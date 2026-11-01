@@ -6,7 +6,8 @@ whisper.cpp, and translates it with an LLM — then overlays the result on the p
 in real time.
 
 Built for the case that started it: a Chinese film on bilibili.tv with no subtitle
-track at all.
+track at all. Verified on that 116-minute film: 1,052 bilingual cues, opening line
+at 02:00, whole-film deep pass done, rendered live on the real player.
 
 ## How it works
 
@@ -75,7 +76,10 @@ is instant and offline.
 - First caption appears after the first 5-minute chunk is transcribed (~40 s on an
   M3 for a 2-hour film's opening chunk); the whole film takes roughly 10–15 min.
 - Subtitle search is native tracks only right now. OpenSubtitles/Wyzie lookup is the
-  next provider in the chain (see roadmap).
+  next provider in the chain (see roadmap). YouTube often refuses `yt-dlp` with a bot
+  check; bilibili and direct video hosts work.
+- ASR runs with `-mc 0` (no cross-window conditioning) because conditioning is what
+  makes whisper loop a single line over music; that costs some speed, not accuracy.
 - Translation quality depends on the source ASR; the deep pass is markedly better
   for films with many character names.
 

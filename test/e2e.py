@@ -56,7 +56,7 @@ async def main():
             const v = document.querySelector('video');
             if (!v) return resolve({error: 'no video'});
             v.muted = true;
-            v.currentTime = 620.4;
+            v.currentTime = 3346.8;
             v.addEventListener('seeked', () => {
                 v.pause();
                 setTimeout(() => resolve({t: v.currentTime, dur: v.duration}), 2500);

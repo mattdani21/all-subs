@@ -239,6 +239,26 @@ def parse_vtt(text):
     return parse_srt(text)
 
 
+def vtt_timestamp(t):
+    ms = int(round(t * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
+
+
+def to_vtt(cues):
+    lines = ["WEBVTT", ""]
+    for c in cues:
+        text = (c.get("dst") or "").strip() or (c.get("src") or "").strip()
+        if not text:
+            continue
+        lines.append("%s --> %s" % (vtt_timestamp(c["start"]), vtt_timestamp(c["end"])))
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
+
+
 def silence_intervals(wav, noise_db=-45, min_dur=4.0):
     """Intervals of near-silence; used to reject ASR hallucinations over quiet audio."""
     proc = subprocess.run(
@@ -283,10 +303,6 @@ def filter_segments(segs, silences, lang=None):
     counts = {}
     for seg in segs:
         counts[_norm(seg["src"])] = counts.get(_norm(seg["src"]), 0) + 1
-    uniques = len([k for k in counts if k])
-    # a chunk with almost no distinct lines and many long segments is a whisper loop
-    if len(segs) >= 6 and uniques <= max(2, len(segs) // 4):
-        return []
 
     out = []
     last = ""
@@ -305,9 +321,10 @@ def filter_segments(segs, silences, lang=None):
             continue
         if silent / dur > 0.6 or (mid_silent and dur > 20):
             continue
-        if counts.get(key, 0) >= 2 and dur >= 8:
+        repeats = counts.get(key, 0)
+        if repeats >= 2 and dur >= 8:
             continue
-        if counts.get(key, 0) >= 3:
+        if repeats >= (4 if len(key) <= 3 else 3):
             continue
         if any(a in key for a in (_norm(x) for x in ARTIFACTS)):
             if counts.get(key, 0) >= 2 or (lang and not lang.startswith("en")):
@@ -344,7 +361,7 @@ def transcribe_chunk(path, base, language="auto"):
     """Run whisper.cpp on one chunk; returns (segments, detected language)."""
     proc = subprocess.run(
         [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", path, "-t", "8", "-l", language,
-         "-ojf", "-of", base],
+         "-mc", "0", "-ojf", "-of", base],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1800)
     if proc.returncode != 0:
         raise RuntimeError("whisper failed: %s" % (proc.stderr or "")[-500:])
@@ -493,9 +510,15 @@ def translate_cues(cues, target, context=None, batch=36):
 def analyze_film(cues, target):
     """Whole-film pass: synopsis + glossary so the final translation is grounded."""
     transcript = "\n".join(c["src"] for c in cues)
-    head = transcript[:24000]
-    tail = transcript[-8000:] if len(transcript) > 24000 else ""
-    body = head + ("\n...\n" + tail if tail else "")
+    if len(transcript) <= 30000:
+        body = transcript
+    else:
+        # sample the whole arc so the glossary sees every act, not just the opening
+        third = 10000
+        body = (transcript[:third] + "\n...\n"
+                + transcript[len(transcript) // 2 - third // 2:
+                             len(transcript) // 2 + third // 2] + "\n...\n"
+                + transcript[-third:])
     system = ("You analyse full film transcripts to prepare a subtitle translation. "
               "Reply with JSON only: {\"synopsis\": \"<=80 words, spoilers allowed\", "
               "\"glossary\": {\"source name or term\": \"%s rendering\"}, "

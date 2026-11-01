@@ -256,9 +256,11 @@
       const d = await api('/health');
       setEngine(!!d.ok);
       if (!d.model) setStatus('Engine running, but the whisper model is missing.', true);
+      else if (!S.job) setStatus('Engine online — ready when you are.');
       return !!d.ok;
     } catch (e) {
       setEngine(false);
+      if (!S.job) setStatus('Local engine offline: cd ~/AllSubs && ./allsubs start', true);
       return false;
     }
   }

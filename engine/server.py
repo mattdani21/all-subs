@@ -110,26 +110,7 @@ class Job(object):
         os.replace(tmp, path)
 
 
-def vtt_timestamp(t):
-    ms = int(round(t * 1000))
-    h, ms = divmod(ms, 3600000)
-    m, ms = divmod(ms, 60000)
-    s, ms = divmod(ms, 1000)
-    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
-
-
-def to_vtt(cues):
-    lines = ["WEBVTT", ""]
-    for c in cues:
-        text = (c.get("dst") or "").strip()
-        if not text:
-            text = c.get("src", "")
-        if not text:
-            continue
-        lines.append("%s --> %s" % (vtt_timestamp(c["start"]), vtt_timestamp(c["end"])))
-        lines.append(text)
-        lines.append("")
-    return "\n".join(lines)
+to_vtt = captions.to_vtt
 
 
 # ---------------------------------------------------------------- pipeline
@@ -165,8 +146,14 @@ def _run_job(job):
         text = captions.download_native_subs(job.url, code, os.path.join(workdir, "sub"))
         cues = captions.parse_vtt(text) if text.lstrip().startswith("WEBVTT") else captions.parse_srt(text)
         cues = captions.split_display([dict(c) for c in cues])
-        for c in cues:
-            c["dst"] = c["src"]
+        if code.lower().startswith(job.target.lower()):
+            for c in cues:
+                c["dst"] = c["src"]
+        else:
+            # found a usable track, but not in the viewer's language: translate it
+            translated = captions.translate_cues(cues, job.target, {"title": job.title})
+            for c in cues:
+                c["dst"] = translated.get(c["i"], c["src"])
         job.add_cues(cues)
         job.set(status="done", stage="Captions ready (%s)" % code, progress=1.0,
                 source="native", lang=code)
