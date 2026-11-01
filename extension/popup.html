@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; width: 300px; background: #0b0d10; color: #e8ecf2;
+         font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { padding: 14px; }
+  .top { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; }
+  .mark { width: 24px; height: 24px; border-radius: 7px; background: #fff; color: #0b0d10;
+          font: 800 10px/24px -apple-system, sans-serif; text-align: center; }
+  .name { font-weight: 650; }
+  .status { color: #9aa4b2; font-size: 12px; margin: 6px 0 12px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #6b7280; }
+  .dot.ok { background: #43d98b; }
+  .dot.err { background: #f87171; }
+  button { width: 100%; padding: 8px; border-radius: 8px; border: 0; background: #e8ecf2;
+           color: #0b0d10; font: 650 12.5px -apple-system, sans-serif; cursor: pointer; }
+  button:hover { background: #fff; }
+  .hint { color: #6b7280; font-size: 11px; margin-top: 10px; }
+  code { background: #171b21; padding: 1px 4px; border-radius: 3px; color: #cbd3df; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top"><div class="mark">AS</div><div class="name">All Subs</div></div>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Checking local engine…</span></div>
+    <button id="open">Caption this page</button>
+    <div class="hint">Shortcut <code>Alt+Shift+A</code>. Engine runs on <code>127.0.0.1:8765</code>.</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+media/
+__pycache__/
+*.pyc
+.engine.pid
+test/*.png

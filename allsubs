@@ -1,0 +1,40 @@
+#!/bin/bash
+# All Subs engine control: ./allsubs start|stop|status|logs
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+PIDFILE="$ROOT/.engine.pid"
+LOG="$HOME/.allsubs/engine.log"
+PORT="${ALLSUBS_PORT:-8765}"
+mkdir -p "$HOME/.allsubs"
+
+running() {
+  [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+case "${1:-status}" in
+  start)
+    if running; then echo "engine already running (pid $(cat "$PIDFILE"))"; exit 0; fi
+    nohup python3 "$ROOT/engine/server.py" >>"$LOG" 2>&1 &
+    echo $! > "$PIDFILE"
+    for i in $(seq 1 30); do
+      if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        echo "engine up on http://127.0.0.1:$PORT (pid $(cat "$PIDFILE"))"
+        exit 0
+      fi
+      sleep 0.3
+    done
+    echo "engine failed to start; tail of log:"; tail -20 "$LOG"; exit 1
+    ;;
+  stop)
+    if running; then kill "$(cat "$PIDFILE")"; rm -f "$PIDFILE"; echo "stopped"; else echo "not running"; fi
+    ;;
+  status)
+    curl -fsS "http://127.0.0.1:$PORT/health" && echo || echo "engine offline"
+    ;;
+  logs)
+    tail -n "${2:-40}" "$LOG"
+    ;;
+  *)
+    echo "usage: $0 start|stop|status|logs"; exit 2
+    ;;
+esac

@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>All Subs — local player harness</title>
+<style>
+  body { margin: 0; background: #07080a; color: #dfe6ee;
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding: 12px 18px; border-bottom: 1px solid #ffffff14; display: flex; gap: 14px; align-items: center; }
+  header b { letter-spacing: .04em; font-size: 12px; text-transform: uppercase; color: #fff; }
+  #status { color: #9aa4b2; font-size: 12px; }
+  .stage { max-width: 1200px; margin: 18px auto; padding: 0 18px; }
+  video { width: 100%; background: #000; border-radius: 8px; display: block; }
+  .bar { height: 3px; background: #1a1f27; border-radius: 2px; margin-top: 10px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: #43d98b; transition: width .3s; }
+  p.hint { color: #6b7280; font-size: 12px; }
+</style>
+</head>
+<body>
+<header><b>All Subs</b><span id="status">loading…</span></header>
+<div class="stage">
+  <video id="v" controls autoplay muted playsinline></video>
+  <div class="bar"><i id="bar"></i></div>
+  <p class="hint">Local harness: plays a media file and renders cues through the same
+  overlay module the extension injects. Add <code>?job=&lt;id&gt;</code> and
+  <code>?src=&lt;path or url&gt;</code>.</p>
+</div>
+<script src="../extension/overlay.js"></script>
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const job = params.get('job') || '';
+  const src = params.get('src') || '';
+  const backend = params.get('backend') || 'http://127.0.0.1:8765';
+  const v = document.getElementById('v');
+  const statusEl = document.getElementById('status');
+  const bar = document.getElementById('bar');
+  if (src) v.src = src;
+  const startAt = parseFloat(params.get('t') || '0') || 0;
+
+  const fx = window.AllSubsOverlay.mount(v);
+
+  if (startAt) {
+    const seek = function () { try { v.currentTime = startAt; v.pause(); } catch (e) {} };
+    if (v.readyState >= 1) seek();
+    else v.addEventListener('loadedmetadata', seek, { once: true });
+  }
+  fx.setBilingual(true);
+
+  async function pull() {
+    if (!job) { statusEl.textContent = 'no job id — add ?job=<id>'; return; }
+    try {
+      const s = await (await fetch(backend + '/api/jobs/' + job, { cache: 'no-store' })).json();
+      statusEl.textContent = s.stage + ' · ' + s.count + ' cues · ' + s.status;
+      bar.style.width = Math.round((s.progress || 0) * 100) + '%';
+      let cues = [];
+      let from = 0;
+      for (let i = 0; i < 40; i++) {
+        const d = await (await fetch(backend + '/api/jobs/' + job + '/cues?from=' + from, { cache: 'no-store' })).json();
+        cues = cues.concat(d.cues || []);
+        if (!d.cues || !d.cues.length || d.next >= d.total) break;
+        from = d.next;
+      }
+      fx.setCues(cues);
+      if (s.status === 'done') return;
+    } catch (e) {
+      statusEl.textContent = 'engine offline';
+    }
+    setTimeout(pull, 2500);
+  }
+  pull();
+})();
+</script>
+</body>
+</html>
