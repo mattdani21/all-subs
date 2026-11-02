@@ -31,6 +31,19 @@ cd ~/AllSubs
 ./allsubs start              # local caption engine on :8765
 ```
 
+### New machine (another Mac)
+
+```bash
+# copy the project (AirDrop the folder, or: git clone <bundle> AllSubs)
+cd AllSubs
+./allsubs setup      # installs ffmpeg / whisper-cpp / yt-dlp, downloads the 1.5 GB model
+./allsubs doctor     # verifies binaries, model, API key, engine
+./allsubs start
+```
+
+`setup` is idempotent. The API key is read from `AllSubs/.env` or `~/.hermes/.env`.
+To reuse captions already generated elsewhere, copy `~/.allsubs/cache` across too.
+
 Load the extension once:
 
 1. `chrome://extensions` → Developer mode → **Load unpacked**

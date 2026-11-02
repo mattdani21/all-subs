@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .engine.pid
 test/*.png
+.env

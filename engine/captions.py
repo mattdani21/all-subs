@@ -48,22 +48,22 @@ for d in (DATA_DIR, JOBS_DIR, CACHE_DIR):
 # ---------------------------------------------------------------- utilities
 
 def load_env():
-    """Pull API keys from the Hermes env file when not already exported."""
-    path = os.path.join(HOME, ".hermes", ".env")
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip(), v.strip().strip('"').strip("'")
-                if k and v and k not in os.environ:
-                    os.environ[k] = v
-    except OSError:
-        pass
+    """Pull API keys from the project .env, then the Hermes env file."""
+    for path in (os.path.join(PROJECT_DIR, ".env"), os.path.join(HOME, ".hermes", ".env")):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k and v and k not in os.environ:
+                        os.environ[k] = v
+        except OSError:
+            pass
 
 
 def run(cmd, timeout=1800, cwd=None):
