@@ -77,6 +77,18 @@ case "${1:-status}" in
     echo; [ $ok -eq 0 ] && echo "all checks passed" || echo "some checks failed"
     exit $ok
     ;;
+  package)
+    VER=$(python3 -c "import json;print(json.load(open('$ROOT/extension/manifest.json'))['version'])")
+    OUT="$ROOT/dist"; mkdir -p "$OUT"
+    TMP="$(mktemp -d)"; mkdir -p "$TMP/AllSubs"
+    rsync -a --exclude media --exclude .git --exclude dist --exclude __pycache__ \
+      --exclude '*.png' --exclude .engine.pid --exclude .env --exclude '*.pyc' \
+      "$ROOT/" "$TMP/AllSubs/"
+    (cd "$TMP" && zip -qr "$OUT/AllSubs-$VER.zip" AllSubs)
+    rm -rf "$TMP"
+    echo "built $OUT/AllSubs-$VER.zip"
+    unzip -l "$OUT/AllSubs-$VER.zip" | tail -3
+    ;;
   start)
     if running; then echo "engine already running (pid $(cat "$PIDFILE"))"; exit 0; fi
     nohup python3 "$ROOT/engine/server.py" >>"$LOG" 2>&1 &
@@ -100,6 +112,6 @@ case "${1:-status}" in
     tail -n "${2:-40}" "$LOG"
     ;;
   *)
-    echo "usage: $0 setup|doctor|start|stop|status|logs"; exit 2
+    echo "usage: $0 setup|doctor|start|stop|status|logs|package"; exit 2
     ;;
 esac

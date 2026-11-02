@@ -44,6 +44,15 @@ cd AllSubs
 `setup` is idempotent. The API key is read from `AllSubs/.env` or `~/.hermes/.env`.
 To reuse captions already generated elsewhere, copy `~/.allsubs/cache` across too.
 
+### Package for sharing
+
+```bash
+./allsubs package      # -> dist/AllSubs-<version>.zip (source only, no media, no .env)
+```
+
+The recipient unzips, runs `./allsubs setup`, then loads `extension/` unpacked. That
+is the right shape for an alpha with technical users; it is not a consumer install.
+
 Load the extension once:
 
 1. `chrome://extensions` → Developer mode → **Load unpacked**

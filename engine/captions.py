@@ -434,33 +434,40 @@ def split_display(cues, limit_seconds=None):
 # ---------------------------------------------------------------- LLM
 
 def llm_json(system, user, max_tokens=2600, temperature=0.2, retries=3):
+    """JSON-mode chat call. deepseek-flash with thinking off; deepseek-chat fallback."""
     load_env()
     key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
-    body = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        "response_format": {"type": "json_object"},
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    data = json.dumps(body).encode()
+    models = [(os.environ.get("ALLSUBS_MODEL", "deepseek-flash"), True)]
+    if models[0][0] != "deepseek-chat":
+        models.append(("deepseek-chat", False))
     last = None
-    for attempt in range(retries):
-        req = urllib.request.Request(
-            "https://api.deepseek.com/chat/completions", data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + key})
-        try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                payload = json.loads(resp.read().decode())
-            content = payload["choices"][0]["message"]["content"]
-            return json.loads(content)
-        except (urllib.error.URLError, KeyError, ValueError, TimeoutError) as exc:
-            last = exc
-            time.sleep(2 + attempt * 3)
+    for model, no_think in models:
+        body = {
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "response_format": {"type": "json_object"},
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if no_think:
+            body["thinking"] = {"type": "disabled"}
+        data = json.dumps(body).encode()
+        for attempt in range(retries):
+            req = urllib.request.Request(
+                "https://api.deepseek.com/chat/completions", data=data,
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer " + key})
+            try:
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    payload = json.loads(resp.read().decode())
+                content = payload["choices"][0]["message"]["content"]
+                return json.loads(content)
+            except (urllib.error.URLError, KeyError, ValueError, TimeoutError) as exc:
+                last = exc
+                time.sleep(1.5 + attempt * 2)
     raise RuntimeError("LLM call failed: %s" % last)
 
 
