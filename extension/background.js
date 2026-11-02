@@ -3,7 +3,8 @@ chrome.runtime.onInstalled.addListener(function () {
     backend: 'http://127.0.0.1:8765',
     target: 'en',
     bilingual: true,
-    deep: false
+    deep: false,
+    local: false
   }, function (v) { chrome.storage.sync.set(v); });
 });
 

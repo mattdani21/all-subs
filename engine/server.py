@@ -38,13 +38,22 @@ def now():
     return time.time()
 
 
+def _local_available():
+    try:
+        import local_llm
+        return local_llm.available()
+    except Exception:
+        return False
+
+
 class Job(object):
-    def __init__(self, job_id, url, target="en", mode="fast", limit=None):
+    def __init__(self, job_id, url, target="en", mode="fast", limit=None, translator="cloud"):
         self.id = job_id
         self.url = url
         self.target = target
         self.mode = mode
         self.limit = limit
+        self.translator = translator
         self.title = ""
         self.duration = 0.0
         self.status = "queued"
@@ -86,6 +95,7 @@ class Job(object):
                 "lang": self.lang, "count": len(self.cues), "version": self.version,
                 "pass2": self.pass2, "error": self.error,
                 "synopsis": self.synopsis, "mode": self.mode,
+                "translator": self.translator,
             }
 
     def cue_payload(self, start=0, limit=400):
@@ -199,6 +209,9 @@ def _run_job(job):
         if job.target and lang and lang.startswith(job.target):
             for c in cues:
                 c["dst"] = c["src"]
+        elif job.translator == "local":
+            for c in cues:
+                c["dst"] = ""
         else:
             translated = captions.translate_cues(
                 cues, job.target,
@@ -213,6 +226,14 @@ def _run_job(job):
 
     if not all_src:
         raise RuntimeError("no speech detected in the audio")
+
+    if job.translator == "local" and not (lang or "").startswith(job.target):
+        _translate_local(job)
+        job.set(status="done", stage="Captions ready", progress=1.0)
+        job.to_disk()
+        _cache(job)
+        log("job %s: done (local), %d cues" % (job.id, len(job.cues)))
+        return
 
     # 3. whole-film pass: the LLM reads everything, then re-translates grounded
     if job.mode == "deep" and not (lang or "").startswith(job.target):
@@ -247,6 +268,58 @@ def _run_job(job):
     log("job %s: done, %d cues" % (job.id, len(job.cues)))
 
 
+def _translate_local(job):
+    """Offline translation pass: whisper is finished, so the small model owns RAM."""
+    from local_llm import LocalTranslator
+    step = 20
+    with LocalTranslator() as lt:
+        total = len(job.cues)
+        job.set(status="translate", stage="Translating on this Mac", progress=0.82)
+        for start in range(0, total, step):
+            if job.status == "cancelled":
+                return
+            with job.lock:
+                batch = list(job.cues[start:start + step])
+            if not batch:
+                break
+            res = captions.translate_cues(
+                batch, job.target, {"title": job.title, "glossary": job.glossary},
+                batch=step, llm=lt.chat_json)
+            with job.lock:
+                for c in batch:
+                    c["dst"] = res.get(c["i"]) or c.get("dst") or c["src"]
+                job.version += 1
+            done = min(start + step, total)
+            job.set(stage="Translating %d/%d (local)" % (done, total),
+                    progress=0.82 + 0.16 * done / max(total, 1))
+            job.to_disk()
+        if job.mode == "deep":
+            try:
+                job.set(status="deep", stage="Reading the whole film (local)",
+                        progress=0.96)
+                info = captions.analyze_film(job.cues, job.target, llm=lt.chat_json)
+                job.set(synopsis=info["synopsis"], glossary=info["glossary"])
+                with job.lock:
+                    snapshot = list(job.cues)
+                for start in range(0, len(snapshot), step):
+                    batch = snapshot[start:start + step]
+                    res = captions.translate_cues(
+                        batch, job.target,
+                        {"title": job.title, "synopsis": job.synopsis,
+                         "glossary": job.glossary}, batch=step, llm=lt.chat_json)
+                    with job.lock:
+                        for c in batch:
+                            if res.get(c["i"]):
+                                c["dst"] = res[c["i"]]
+                        job.version += 1
+                    job.set(stage="Refining %d/%d (local)" % (
+                        min(start + step, len(snapshot)), len(snapshot)))
+                job.pass2 = True
+                job.to_disk()
+            except Exception as exc:
+                log("job %s: local deep pass failed: %s" % (job.id, exc))
+
+
 def _cache(job):
     snap = job.snapshot()
     with job.lock:
@@ -255,15 +328,15 @@ def _cache(job):
     captions.save_cache(job.id, snap)
 
 
-def get_or_create(url, target, mode, limit):
-    key = captions.url_key(url, target)
+def get_or_create(url, target, mode, limit, translator="cloud"):
+    key = captions.url_key(url, target if translator == "cloud" else target + "|" + translator)
     with JOBS_LOCK:
         job = JOBS.get(key)
         if job and job.status not in ("error", "cancelled"):
             return job, False
         cached = captions.load_cache(key)
         if cached and cached.get("cues") and cached.get("status") == "done":
-            job = Job(key, url, target, mode, limit)
+            job = Job(key, url, target, mode, limit, translator)
             job.title = cached.get("title") or ""
             job.duration = cached.get("duration") or 0
             job.source = cached.get("source")
@@ -278,7 +351,7 @@ def get_or_create(url, target, mode, limit):
             JOBS[key] = job
             log("job %s: served from cache" % key)
             return job, False
-        job = Job(key, url, target, mode, limit)
+        job = Job(key, url, target, mode, limit, translator)
         JOBS[key] = job
     threading.Thread(target=run_job, args=(job,), daemon=True).start()
     return job, True
@@ -294,7 +367,7 @@ def load_existing_jobs():
             with open(os.path.join(captions.JOBS_DIR, name)) as fh:
                 data = json.load(fh)
             job = Job(data["id"], data.get("url", ""), data.get("target", "en"),
-                      data.get("mode", "fast"))
+                      data.get("mode", "fast"), None, data.get("translator", "cloud"))
             for k in ("title", "duration", "status", "stage", "progress", "source",
                       "lang", "version", "pass2", "synopsis", "glossary"):
                 if k in data:
@@ -352,7 +425,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "version": VERSION,
                 "whisper": os.path.exists(captions.WHISPER_BIN),
                 "model": os.path.exists(captions.WHISPER_MODEL),
-                "jobs": len(JOBS),
+                "jobs": len(JOBS), "local": _local_available(),
+                "ram_gb": round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9, 1),
             })
 
         if path == "/" or path == "/jobs":
@@ -422,7 +496,8 @@ class Handler(BaseHTTPRequestHandler):
             target = body.get("target") or "en"
             mode = body.get("mode") or "fast"
             limit = body.get("limit")
-            job, created = get_or_create(url, target, mode, limit)
+            translator = body.get("translator") or "cloud"
+            job, created = get_or_create(url, target, mode, limit, translator)
             log("%s job %s for %s (%s)" % ("created" if created else "reused",
                                            job.id, url[:80], target))
             return self._send(200, dict(job.snapshot(), created=created))

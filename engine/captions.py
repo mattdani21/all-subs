@@ -482,8 +482,9 @@ TRANSLATE_SYSTEM = (
 )
 
 
-def translate_cues(cues, target, context=None, batch=36):
+def translate_cues(cues, target, context=None, batch=36, llm=None):
     """Translate display cues; returns dict index -> translated text."""
+    call = llm or llm_json
     target_name = TARGET_NAMES.get(target, target)
     system = TRANSLATE_SYSTEM.format(target=target_name)
     out = {}
@@ -502,7 +503,7 @@ def translate_cues(cues, target, context=None, batch=36):
         if ctx.get("previous"):
             user_parts.append("PREVIOUS LINES (context, do not translate): " + ctx["previous"])
         user_parts.append("LINES:\n" + json.dumps(lines, ensure_ascii=False))
-        res = llm_json(system, "\n\n".join(user_parts), max_tokens=3000)
+        res = call(system, "\n\n".join(user_parts), max_tokens=3000)
         table = res.get("t") or {}
         for c in chunk:
             val = table.get(str(c["i"]))
@@ -514,7 +515,7 @@ def translate_cues(cues, target, context=None, batch=36):
     return out
 
 
-def analyze_film(cues, target):
+def analyze_film(cues, target, llm=None):
     """Whole-film pass: synopsis + glossary so the final translation is grounded."""
     transcript = "\n".join(c["src"] for c in cues)
     if len(transcript) <= 30000:
@@ -531,7 +532,7 @@ def analyze_film(cues, target):
               "\"glossary\": {\"source name or term\": \"%s rendering\"}, "
               "\"register\": \"one line on tone\"}." % TARGET_NAMES.get(target, target))
     user = "FILM TRANSCRIPT:\n" + body
-    res = llm_json(system, user, max_tokens=2000, temperature=0.1)
+    res = (llm or llm_json)(system, user, max_tokens=2000, temperature=0.1)
     return {
         "synopsis": (res.get("synopsis") or "").strip(),
         "glossary": res.get("glossary") or {},

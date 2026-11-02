@@ -14,7 +14,8 @@
     backend: 'http://127.0.0.1:8765',
     target: 'en',
     bilingual: true,
-    deep: false
+    deep: false,
+    local: false
   };
   const LANGS = [
     ['en', 'English'], ['zh', 'Chinese'], ['ko', 'Korean'], ['ja', 'Japanese'],
@@ -130,6 +131,7 @@
       '<div class="status" data-el="status">Ready.</div>',
       '<div class="row"><label>Captions in</label><select data-el="lang"></select></div>',
       '<div class="row"><label class="check"><input type="checkbox" data-el="deep"> Deep read (the model watches the whole film first)</label></div>',
+      '<div class="row"><label class="check"><input type="checkbox" data-el="local"> Translate offline on this Mac (4B model, slower)</label></div>',
       '<button class="go" data-el="go">Caption this video</button>',
       '<div class="bar"><i data-el="bar"></i></div>',
       '<div class="foot">',
@@ -159,6 +161,7 @@
       saveCfg();
     });
     q('deep').addEventListener('change', function () { cfg.deep = this.checked; saveCfg(); });
+    q('local').addEventListener('change', function () { cfg.local = this.checked; saveCfg(); });
     q('close').addEventListener('click', function () { togglePanel(false); });
     q('go').addEventListener('click', function () { startJob(); });
     q('bilingual').addEventListener('click', function () {
@@ -221,6 +224,8 @@
     if (sel && sel.value !== cfg.target) sel.value = cfg.target;
     const deep = S.root.querySelector('[data-el="deep"]');
     if (deep) deep.checked = !!cfg.deep;
+    const local = S.root.querySelector('[data-el="local"]');
+    if (local) local.checked = !!cfg.local;
     const bi = S.root.querySelector('[data-el="bilingual"]');
     if (bi) bi.classList.toggle('on', !!cfg.bilingual);
   }
@@ -255,6 +260,14 @@
     try {
       const d = await api('/health');
       setEngine(!!d.ok);
+      const localBox = S.root.querySelector('[data-el="local"]');
+      if (localBox) {
+        const tooSmall = d.ram_gb && d.ram_gb < 15;
+        localBox.disabled = d.local === false || tooSmall;
+        localBox.parentElement.title = d.local === false
+          ? 'No local model — run ./allsubs local-model'
+          : (tooSmall ? 'Offline mode needs 16 GB+ for GPU offload' : '');
+      }
       if (!d.model) setStatus('Engine running, but the whisper model is missing.', true);
       else if (!S.job) setStatus('Engine online — ready when you are.');
       return !!d.ok;
@@ -331,7 +344,10 @@
     try {
       const job = await api('/api/jobs', {
         method: 'POST',
-        body: { url: url, target: cfg.target, mode: cfg.deep ? 'deep' : 'fast' }
+        body: {
+          url: url, target: cfg.target, mode: cfg.deep ? 'deep' : 'fast',
+          translator: cfg.local ? 'local' : 'cloud'
+        }
       });
       S.job = job.id;
       S.cues = []; S.version = -1; S.pass2 = false;

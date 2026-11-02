@@ -77,6 +77,18 @@ case "${1:-status}" in
     echo; [ $ok -eq 0 ] && echo "all checks passed" || echo "some checks failed"
     exit $ok
     ;;
+  local-model)
+    DIR="$ROOT/models"; mkdir -p "$DIR"
+    FILE="$DIR/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+    if [ -s "$FILE" ]; then
+      echo "already present: $FILE ($(du -h "$FILE" | cut -f1))"
+    else
+      echo "downloading Qwen3-4B-Instruct Q4_K_M (~2.5 GB) for offline translation"
+      curl -L --fail --progress-bar -C - -o "$FILE" \
+        "https://huggingface.co/lmstudio-community/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf" || exit 1
+      echo "saved $FILE"
+    fi
+    ;;
   package)
     VER=$(python3 -c "import json;print(json.load(open('$ROOT/extension/manifest.json'))['version'])")
     OUT="$ROOT/dist"; mkdir -p "$OUT"
@@ -112,6 +124,6 @@ case "${1:-status}" in
     tail -n "${2:-40}" "$LOG"
     ;;
   *)
-    echo "usage: $0 setup|doctor|start|stop|status|logs|package"; exit 2
+    echo "usage: $0 setup|doctor|start|stop|status|logs|package|local-model"; exit 2
     ;;
 esac

@@ -81,6 +81,22 @@ Click it (or press `Alt+Shift+A`) → *Caption this video*.
 Jobs are keyed by URL+target and cached in `~/.allsubs/cache`, so revisiting a film
 is instant and offline.
 
+## Offline mode (experimental)
+
+```bash
+./allsubs local-model     # Qwen3-4B-Instruct Q4_K_M, ~2.5 GB
+```
+
+Tick **Translate offline on this Mac** in the panel. Transcription runs first and
+`llama-server` starts only afterwards, so whisper and the small model never share RAM.
+Switching this on produces flatter translations ("都督" becomes "Dudu" rather than
+"Commander") and is much slower than DeepSeek.
+
+Measured on an 8 GB M3: Metal offload for the 4B model fails with a command-buffer OOM
+and the fallback runs CPU-only around 9 tok/s; under real memory pressure a 10-minute
+clip managed 20 of 140 cues in 4.5 minutes. The toggle disables itself below 16 GB for
+that reason — on 16 GB+ it is usable, just slower than the cloud path.
+
 ## Controls
 
 - `Alt+Shift+A` — open/close the panel
@@ -104,6 +120,8 @@ is instant and offline.
   makes whisper loop a single line over music; that costs some speed, not accuracy.
 - Translation quality depends on the source ASR; the deep pass is markedly better
   for films with many character names.
+- Offline mode needs 16 GB+ for GPU offload; on 8 GB it falls back to CPU and is
+  impractically slow. Cloud translation stays the default.
 
 ## Roadmap
 
