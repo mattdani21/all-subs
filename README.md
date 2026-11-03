@@ -81,6 +81,19 @@ Click it (or press `Alt+Shift+A`) → *Caption this video*.
 Jobs are keyed by URL+target and cached in `~/.allsubs/cache`, so revisiting a film
 is instant and offline.
 
+## Speed
+
+- Chunks are 60 s / 120 s / then 300 s, so the first caption lands about a minute in
+  instead of after the first five-minute chunk.
+- Translation runs in a worker thread while the next chunk is being transcribed, so
+  the two stages overlap instead of adding up.
+- The whole-film deep pass fans out 6 translation batches at once.
+- `--debug` numbers land in the engine log per job: `asr`, `translate`, `deep` seconds.
+
+ASR is the floor: whisper large-v3-turbo runs ~7-13x realtime on an M3 depending on how
+much speech the chunk contains, and that dominates wall time. Beating it materially needs
+either an existing subtitle track (seconds) or a GPU service.
+
 ## Offline mode (experimental)
 
 ```bash
