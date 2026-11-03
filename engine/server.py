@@ -273,42 +273,7 @@ def _run_job(job):
 
     # 3. whole-film pass: the LLM reads everything, then re-translates in parallel
     if job.mode == "deep" and not (lang or "").startswith(job.target):
-        try:
-            t0 = time.time()
-            job.set(status="deep", stage="Reading the whole film", progress=0.92)
-            info = captions.analyze_film(all_src, job.target)
-            job.set(synopsis=info["synopsis"], glossary=info["glossary"])
-            with job.lock:
-                snapshot = list(job.cues)
-            batches = [snapshot[i:i + 36] for i in range(0, len(snapshot), 36)]
-            result = {}
-            done = [0]
-            lock = threading.Lock()
-
-            def refine(batch):
-                res = captions.translate_cues(
-                    batch, job.target,
-                    {"title": job.title, "synopsis": job.synopsis,
-                     "glossary": job.glossary, "previous": ""})
-                with lock:
-                    result.update(res)
-                    done[0] += len(batch)
-                    job.set(stage="Refining translation %d/%d" % (
-                        done[0], len(snapshot)),
-                        progress=0.92 + 0.07 * done[0] / max(len(snapshot), 1))
-                return True
-
-            with ThreadPoolExecutor(max_workers=6) as pool:
-                list(pool.map(refine, batches))
-            with job.lock:
-                for c in job.cues:
-                    if result.get(c["i"]):
-                        c["dst"] = result[c["i"]]
-                job.version += 1
-                job.pass2 = True
-            timings["deep"] = time.time() - t0
-        except Exception as exc:  # fast captions already exist; keep them
-            log("job %s: deep pass failed: %s" % (job.id, exc))
+        timings["deep"] = _deep_pass(job)
 
     job.set(status="done", stage="Captions ready", progress=1.0)
     job.to_disk()
@@ -367,6 +332,50 @@ def _translate_local(job):
                 job.to_disk()
             except Exception as exc:
                 log("job %s: local deep pass failed: %s" % (job.id, exc))
+
+
+def _deep_pass(job):
+    """Whole-film context + parallel retranslation. Returns elapsed seconds."""
+    all_src = [c["src"] for c in job.cues]
+    t0 = time.time()
+    try:
+        job.set(status="deep", stage="Reading the whole film", progress=0.92)
+        info = captions.analyze_film(all_src, job.target)
+        job.set(synopsis=info["synopsis"], glossary=info["glossary"])
+        with job.lock:
+            snapshot = list(job.cues)
+        batches = [snapshot[i:i + 36] for i in range(0, len(snapshot), 36)]
+        result = {}
+        done = [0]
+        lock = threading.Lock()
+
+        def refine(batch):
+            res = captions.translate_cues(
+                batch, job.target,
+                {"title": job.title, "synopsis": job.synopsis,
+                 "glossary": job.glossary, "previous": ""})
+            with lock:
+                result.update(res)
+                done[0] += len(batch)
+                job.set(stage="Refining translation %d/%d" % (
+                    done[0], len(snapshot)),
+                    progress=0.92 + 0.07 * done[0] / max(len(snapshot), 1))
+            return True
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(refine, batches))
+        with job.lock:
+            for c in job.cues:
+                if result.get(c["i"]):
+                    c["dst"] = result[c["i"]]
+            job.version += 1
+            job.pass2 = True
+        job.to_disk()
+    except Exception as exc:
+        log("job %s: deep pass failed: %s" % (job.id, exc))
+    elapsed = time.time() - t0
+    log("job %s: deep pass %.0fs" % (job.id, elapsed))
+    return elapsed
 
 
 def _cache(job):
@@ -550,6 +559,21 @@ class Handler(BaseHTTPRequestHandler):
             log("%s job %s for %s (%s)" % ("created" if created else "reused",
                                            job.id, url[:80], target))
             return self._send(200, dict(job.snapshot(), created=created))
+
+        m = re.match(r"^/api/jobs/([a-zA-Z0-9]+)/refine$", parsed.path)
+        if m:
+            job = JOBS.get(m.group(1))
+            if not job or not job.cues:
+                return self._send(404, {"error": "no such job"})
+            job.set(status="deep", stage="Reading the whole film", progress=0.9)
+
+            def run():
+                _deep_pass(job)
+                job.set(status="done", stage="Captions ready", progress=1.0)
+                _cache(job)
+
+            threading.Thread(target=run, daemon=True).start()
+            return self._send(200, job.snapshot())
 
         m = re.match(r"^/api/jobs/([a-zA-Z0-9]+)/cancel$", parsed.path)
         if m:

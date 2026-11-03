@@ -518,7 +518,10 @@ def translate_cues(cues, target, context=None, batch=36, llm=None):
 
 def analyze_film(cues, target, llm=None):
     """Whole-film pass: synopsis + glossary so the final translation is grounded."""
-    transcript = "\n".join(c["src"] for c in cues)
+    if cues and isinstance(cues[0], str):
+        transcript = "\n".join(cues)
+    else:
+        transcript = "\n".join(c["src"] for c in cues)
     if len(transcript) <= 30000:
         body = transcript
     else:
