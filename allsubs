@@ -74,6 +74,16 @@ case "${1:-status}" in
     curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || { echo "offline (./allsubs start)"; ok=1; }
     printf "%-16s " "extension"; [ -f "$ROOT/extension/manifest.json" ] && echo "$ROOT/extension" || { echo missing; ok=1; }
     printf "%-16s " "chrome"; [ -d "/Applications/Google Chrome.app" ] && echo present || echo "not found"
+    printf "%-16s " "port"
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      if curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"version"'; then
+        echo "allsubs"
+      else
+        echo "held by another process"; ok=1
+      fi
+    else
+      echo "free"
+    fi
     echo; [ $ok -eq 0 ] && echo "all checks passed" || echo "some checks failed"
     exit $ok
     ;;
@@ -103,6 +113,14 @@ case "${1:-status}" in
     ;;
   start)
     if running; then echo "engine already running (pid $(cat "$PIDFILE"))"; exit 0; fi
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      if ! curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"version"'; then
+        echo "port $PORT is held by another process:"
+        lsof -nP -iTCP:"$PORT" -sTCP:LISTEN
+        echo "stop that process (or run with ALLSUBS_PORT=...) and retry"
+        exit 1
+      fi
+    fi
     nohup python3 "$ROOT/engine/server.py" >>"$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     for i in $(seq 1 30); do
