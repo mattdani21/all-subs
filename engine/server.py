@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import sys
 import threading
 import time
 import traceback
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import captions
@@ -70,6 +72,7 @@ class Job(object):
         self.created = now()
         self.updated = now()
         self.lock = threading.Lock()
+        self.disk_lock = threading.Lock()
 
     def set(self, **kw):
         with self.lock:
@@ -110,14 +113,15 @@ class Job(object):
 
     def to_disk(self):
         path = os.path.join(captions.JOBS_DIR, self.id + ".json")
-        data = self.snapshot()
-        with self.lock:
-            data["cues"] = self.cues
+        with self.disk_lock:
+            data = self.snapshot()
+            with self.lock:
+                data["cues"] = self.cues
             data["glossary"] = self.glossary
-        tmp = path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(data, fh, ensure_ascii=False)
-        os.replace(tmp, path)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+            os.replace(tmp, path)
 
 
 to_vtt = captions.to_vtt
@@ -183,49 +187,81 @@ def _run_job(job):
         job.set(duration=total)
 
     job.set(duration=total)
-    chunks = captions.split_wav(wav, workdir, limit=job.limit)
+    chunks = captions.split_wav(wav, workdir, limit=job.limit, schedule=[60, 120, 300])
     job.set(status="asr", stage="Transcribing 0/%d" % len(chunks), progress=0.1,
             source="asr")
-    log("job %s: %d chunks, %.0fs audio" % (job.id, len(chunks), total))
+    log("job %s: %d chunks (first %ss), %.0fs audio" % (
+        job.id, len(chunks), chunks[0][2] if chunks else 0, total))
 
     lang = captions.detect_language(wav, total) or "auto"
     job.set(lang=lang)
     log("job %s: language %s" % (job.id, lang))
-    all_src = []
-    for idx, (path, offset, length) in enumerate(chunks):
-        if job.status == "cancelled":
-            return
-        silences = captions.silence_intervals(path)
-        cues, _detected = captions.transcribe_chunk(
-            path, os.path.join(workdir, "c%03d" % idx), lang)
-        cues = captions.filter_segments(cues, silences, lang)
-        for c in cues:
-            c["start"] = round(c["start"] + offset, 3)
-            c["end"] = round(c["end"] + offset, 3)
-        cues = captions.split_display(cues)
-        if not cues:
-            continue
-        all_src.extend(cues)
-        if job.target and lang and lang.startswith(job.target):
-            for c in cues:
-                c["dst"] = c["src"]
-        elif job.translator == "local":
-            for c in cues:
-                c["dst"] = ""
-        else:
-            translated = captions.translate_cues(
-                cues, job.target,
-                {"title": job.title, "glossary": job.glossary,
-                 "previous": job.cues[-1]["src"] if job.cues else ""})
-            for c in cues:
-                c["dst"] = translated.get(c["i"], "")
-        job.add_cues(cues)
-        job.set(stage="Transcribing %d/%d" % (idx + 1, len(chunks)),
-                progress=0.1 + 0.8 * (idx + 1) / len(chunks))
-        job.to_disk()
 
-    if not all_src:
+    timings = {"asr": 0.0, "translate": 0.0, "deep": 0.0}
+    pending = queue.Queue(maxsize=3)
+    state = {"done": 0}
+    last_src = [""]
+
+    def translate_worker():
+        """Translate finished chunks while the next chunk is being transcribed."""
+        while True:
+            cues = pending.get()
+            if cues is None:
+                pending.task_done()
+                return
+            t0 = time.time()
+            if job.target and lang and lang.startswith(job.target):
+                for c in cues:
+                    c["dst"] = c["src"]
+            elif job.translator == "local":
+                for c in cues:
+                    c["dst"] = ""
+            else:
+                translated = captions.translate_cues(
+                    cues, job.target,
+                    {"title": job.title, "glossary": job.glossary,
+                     "previous": last_src[0]})
+                for c in cues:
+                    c["dst"] = translated.get(c["i"], "")
+            if cues:
+                last_src[0] = cues[-1]["src"]
+            job.add_cues(cues)
+            timings["translate"] += time.time() - t0
+            job.set(stage="%d/%d transcribed \u00b7 %d cues" % (
+                state["done"], len(chunks), len(job.cues)))
+            job.to_disk()
+            pending.task_done()
+
+    worker = threading.Thread(target=translate_worker, daemon=True)
+    worker.start()
+    try:
+        for idx, (path, offset, length) in enumerate(chunks):
+            if job.status == "cancelled":
+                return
+            t0 = time.time()
+            silences = captions.silence_intervals(path)
+            cues, _detected = captions.transcribe_chunk(
+                path, os.path.join(workdir, "c%03d" % idx), lang)
+            cues = captions.filter_segments(cues, silences, lang)
+            for c in cues:
+                c["start"] = round(c["start"] + offset, 3)
+                c["end"] = round(c["end"] + offset, 3)
+            cues = captions.split_display(cues)
+            timings["asr"] += time.time() - t0
+            state["done"] = idx + 1
+            if cues:
+                pending.put(cues)
+            job.set(stage="Transcribing %d/%d" % (idx + 1, len(chunks)),
+                    progress=0.1 + 0.8 * (idx + 1) / len(chunks))
+    finally:
+        pending.put(None)
+        pending.join()
+        worker.join()
+
+    if not job.cues:
         raise RuntimeError("no speech detected in the audio")
+    with job.lock:
+        all_src = [c["src"] for c in job.cues]
 
     if job.translator == "local" and not (lang or "").startswith(job.target):
         _translate_local(job)
@@ -235,37 +271,50 @@ def _run_job(job):
         log("job %s: done (local), %d cues" % (job.id, len(job.cues)))
         return
 
-    # 3. whole-film pass: the LLM reads everything, then re-translates grounded
+    # 3. whole-film pass: the LLM reads everything, then re-translates in parallel
     if job.mode == "deep" and not (lang or "").startswith(job.target):
         try:
+            t0 = time.time()
             job.set(status="deep", stage="Reading the whole film", progress=0.92)
             info = captions.analyze_film(all_src, job.target)
             job.set(synopsis=info["synopsis"], glossary=info["glossary"])
             with job.lock:
                 snapshot = list(job.cues)
+            batches = [snapshot[i:i + 36] for i in range(0, len(snapshot), 36)]
             result = {}
-            for start in range(0, len(snapshot), 36):
-                batch = snapshot[start:start + 36]
-                result.update(captions.translate_cues(
+            done = [0]
+            lock = threading.Lock()
+
+            def refine(batch):
+                res = captions.translate_cues(
                     batch, job.target,
                     {"title": job.title, "synopsis": job.synopsis,
-                     "glossary": job.glossary, "previous": ""}))
-                job.set(stage="Refining translation %d/%d" % (
-                    min(start + 36, len(snapshot)), len(snapshot)),
-                    progress=0.92 + 0.07 * (start + 36) / max(len(snapshot), 1))
+                     "glossary": job.glossary, "previous": ""})
+                with lock:
+                    result.update(res)
+                    done[0] += len(batch)
+                    job.set(stage="Refining translation %d/%d" % (
+                        done[0], len(snapshot)),
+                        progress=0.92 + 0.07 * done[0] / max(len(snapshot), 1))
+                return True
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(refine, batches))
             with job.lock:
                 for c in job.cues:
                     if result.get(c["i"]):
                         c["dst"] = result[c["i"]]
                 job.version += 1
                 job.pass2 = True
+            timings["deep"] = time.time() - t0
         except Exception as exc:  # fast captions already exist; keep them
             log("job %s: deep pass failed: %s" % (job.id, exc))
 
     job.set(status="done", stage="Captions ready", progress=1.0)
     job.to_disk()
     _cache(job)
-    log("job %s: done, %d cues" % (job.id, len(job.cues)))
+    log("job %s: done, %d cues (asr %.0fs, translate %.0fs, deep %.0fs)" % (
+        job.id, len(job.cues), timings["asr"], timings["translate"], timings["deep"]))
 
 
 def _translate_local(job):

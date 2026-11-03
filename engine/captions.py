@@ -178,8 +178,8 @@ def to_wav(src, dst):
     return dst
 
 
-def split_wav(wav, workdir, chunk_seconds=CHUNK_SECONDS, limit=None):
-    """Split the wav into chunks; `limit` caps how many seconds to cut."""
+def split_wav(wav, workdir, chunk_seconds=CHUNK_SECONDS, limit=None, schedule=None):
+    """Split the wav into chunks; `schedule` overrides the first chunk sizes."""
     total = duration_of(wav)
     if limit:
         total = min(total, float(limit))
@@ -189,7 +189,8 @@ def split_wav(wav, workdir, chunk_seconds=CHUNK_SECONDS, limit=None):
     start = 0.0
     idx = 0
     while start < total - 0.01:
-        length = min(chunk_seconds, total - start)
+        want = schedule[idx] if schedule and idx < len(schedule) else chunk_seconds
+        length = min(want, total - start)
         path = os.path.join(workdir, "chunk_%03d.wav" % idx)
         run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", str(length),
              "-i", wav, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", path],
