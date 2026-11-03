@@ -99,12 +99,34 @@ case "${1:-status}" in
       echo "saved $FILE"
     fi
     ;;
+  handoff)
+    DIR="$ROOT/dist"; mkdir -p "$DIR"
+    PARENT="$(dirname "$ROOT")"; NAME="$(basename "$ROOT")"
+    TMP="$(mktemp -d)/AllSubs-src.tgz"
+    (cd "$PARENT" && tar czf "$TMP" \
+       --exclude="$NAME/media" --exclude="$NAME/models" --exclude="$NAME/dist" \
+       --exclude='__pycache__' \
+       --exclude="$NAME/test/*.png" --exclude="$NAME/.engine.pid" \
+       --exclude="$NAME/.env" "$NAME") || exit 1
+    mv "$TMP" "$DIR/AllSubs-src.tgz"
+    IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+    if [ -z "$IP" ]; then echo "no LAN address found (not on Wi-Fi?)"; exit 1; fi
+    TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(9))")
+    PORT="${ALLSUBS_HANDOFF_PORT:-8790}"
+    echo "On the other Mac, run:"
+    echo
+    echo "  curl -fsSL http://$IP:$PORT/$TOKEN/install.sh | bash"
+    echo
+    echo "one-shot: dies in 15 min, serves only the installer and the archive (Ctrl-C to stop)"
+    exec python3 "$ROOT/engine/handoff.py" "$ROOT" "$TOKEN" "$PORT" 900
+    ;;
   package)
     VER=$(python3 -c "import json;print(json.load(open('$ROOT/extension/manifest.json'))['version'])")
     OUT="$ROOT/dist"; mkdir -p "$OUT"
     TMP="$(mktemp -d)"; mkdir -p "$TMP/AllSubs"
-    rsync -a --exclude media --exclude .git --exclude dist --exclude __pycache__ \
-      --exclude '*.png' --exclude .engine.pid --exclude .env --exclude '*.pyc' \
+    rsync -a --exclude media --exclude models --exclude .git --exclude dist \
+      --exclude __pycache__ --exclude '*.png' --exclude .engine.pid --exclude .env \
+      --exclude '*.pyc' \
       "$ROOT/" "$TMP/AllSubs/"
     (cd "$TMP" && zip -qr "$OUT/AllSubs-$VER.zip" AllSubs)
     rm -rf "$TMP"
@@ -142,6 +164,6 @@ case "${1:-status}" in
     tail -n "${2:-40}" "$LOG"
     ;;
   *)
-    echo "usage: $0 setup|doctor|start|stop|status|logs|package|local-model"; exit 2
+    echo "usage: $0 setup|doctor|start|stop|status|logs|package|local-model|handoff"; exit 2
     ;;
 esac
