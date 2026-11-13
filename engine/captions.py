@@ -47,8 +47,33 @@ for d in (DATA_DIR, JOBS_DIR, CACHE_DIR):
 
 # ---------------------------------------------------------------- utilities
 
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+
+
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(data):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=1)
+    os.replace(tmp, CONFIG_PATH)
+    try:
+        os.chmod(CONFIG_PATH, 0o600)
+    except OSError:
+        pass
+
+
 def load_env():
-    """Pull API keys from the project .env, then the Hermes env file."""
+    """Pull API keys from .env files, then the runtime config written by the UI."""
     for path in (os.path.join(PROJECT_DIR, ".env"), os.path.join(HOME, ".hermes", ".env")):
         if not os.path.exists(path):
             continue
@@ -64,6 +89,11 @@ def load_env():
                         os.environ[k] = v
         except OSError:
             pass
+    for env_name, cfg_name in (("DEEPSEEK_API_KEY", "deepseek_api_key"),
+                               ("WYZIE_API_KEY", "wyzie_api_key")):
+        cfg = load_config()
+        if cfg.get(cfg_name) and not os.environ.get(env_name):
+            os.environ[env_name] = cfg[cfg_name]
 
 
 def run(cmd, timeout=1800, cwd=None):

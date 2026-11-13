@@ -18,7 +18,7 @@ import providers
 
 PORT = int(os.environ.get("ALLSUBS_PORT", "8765"))
 MAX_WORKERS = 2
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -39,6 +39,21 @@ def log(msg):
 
 def now():
     return time.time()
+
+
+def _setup_state():
+    captions.load_env()
+    return {
+        "ok": True,
+        "version": VERSION,
+        "whisper": os.path.exists(captions.WHISPER_BIN),
+        "model": os.path.exists(captions.WHISPER_MODEL),
+        "ytdlp": bool(captions.YTDLP and os.path.exists(captions.YTDLP)),
+        "deepseek_key": bool(os.environ.get("DEEPSEEK_API_KEY")),
+        "wyzie_key": bool(os.environ.get("WYZIE_API_KEY")),
+        "local": _local_available(),
+        "ram_gb": round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9, 1),
+    }
 
 
 def _local_available():
@@ -513,13 +528,12 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
 
         if path == "/health":
-            return self._send(200, {
-                "ok": True, "version": VERSION,
-                "whisper": os.path.exists(captions.WHISPER_BIN),
-                "model": os.path.exists(captions.WHISPER_MODEL),
-                "jobs": len(JOBS), "local": _local_available(),
-                "ram_gb": round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9, 1),
-            })
+            payload = _setup_state()
+            payload["jobs"] = len(JOBS)
+            return self._send(200, payload)
+
+        if path == "/api/config":
+            return self._send(200, _setup_state())
 
         if path == "/" or path == "/jobs":
             rows = "".join(
@@ -580,6 +594,25 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode() or "{}")
         except ValueError:
             return self._send(400, {"error": "bad json"})
+
+        if parsed.path == "/api/config":
+            cfg = captions.load_config()
+            changed = []
+            for field in ("deepseek_api_key", "wyzie_api_key"):
+                value = (body.get(field) or "").strip()
+                if value:
+                    cfg[field] = value
+                    changed.append(field)
+            if changed:
+                captions.save_config(cfg)
+                captions.load_env()
+                for env_name, cfg_name in (("DEEPSEEK_API_KEY", "deepseek_api_key"),
+                                           ("WYZIE_API_KEY", "wyzie_api_key")):
+                    if cfg.get(cfg_name):
+                        os.environ[env_name] = cfg[cfg_name]
+            state = _setup_state()
+            state["saved"] = changed
+            return self._send(200, state)
 
         if parsed.path == "/api/jobs":
             url = (body.get("url") or "").strip()

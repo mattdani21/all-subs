@@ -139,6 +139,7 @@
       '<button class="mini" data-el="minus">−0.3s</button>',
       '<button class="mini" data-el="plus">+0.3s</button>',
       '<button class="mini" data-el="reload">Re-sync</button>',
+      '<button class="mini" data-el="settings">Settings</button>',
       '</div>',
       '<div class="meta" data-el="meta"></div>',
       '</div>'
@@ -170,6 +171,9 @@
     });
     q('minus').addEventListener('click', function () { adjustOffset(-0.3); });
     q('plus').addEventListener('click', function () { adjustOffset(0.3); });
+    q('settings').addEventListener('click', function () {
+      if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
+    });
     q('reload').addEventListener('click', function () {
       if (S.job) { S.cues = []; S.version = -1; refresh(true); }
     });
@@ -268,8 +272,13 @@
           ? 'No local model — run ./allsubs local-model'
           : (tooSmall ? 'Offline mode needs 16 GB+ for GPU offload' : '');
       }
-      if (!d.model) setStatus('Engine running, but the whisper model is missing.', true);
-      else if (!S.job) setStatus('Engine online — ready when you are.');
+      if (!d.model) {
+        setStatus('Speech model missing — run: cd ~/AllSubs && ./allsubs setup', true);
+      } else if (d.deepseek_key === false) {
+        setStatus('No translation key — open Settings to add one.', true);
+      } else if (!S.job) {
+        setStatus('Engine online — ready when you are.');
+      }
       return !!d.ok;
     } catch (e) {
       setEngine(false);

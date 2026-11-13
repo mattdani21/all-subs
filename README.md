@@ -24,6 +24,19 @@ Chrome extension  ──►  local engine (127.0.0.1:8765)
 
 Nothing leaves the machine except the text sent to the translation API.
 
+## First run (no terminal editing)
+
+Open **Settings** from the panel (or `chrome://extensions` → Details → Extension options):
+
+- **Engine** — backend URL plus a Test button that reports engine, whisper, model, yt-dlp
+  and both keys.
+- **Keys** — paste the DeepSeek key (required) and Wyzie key (optional). They are written
+  to `~/.allsubs/config.json` with mode 600 and never returned by the API.
+- **Defaults** — caption language, bilingual, deep read, offline.
+
+The panel tells you what is missing instead of failing quietly: *engine offline* (with the
+start command), *speech model missing*, *no translation key* (opens Settings), or *ready*.
+
 ## Install
 
 ```bash
