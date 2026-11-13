@@ -15,7 +15,8 @@
     target: 'en',
     bilingual: true,
     deep: false,
-    local: false
+    local: false,
+    cloudAsr: false
   };
   const LANGS = [
     ['en', 'English'], ['zh', 'Chinese'], ['ko', 'Korean'], ['ja', 'Japanese'],
@@ -356,6 +357,7 @@
         body: {
           url: url, target: cfg.target, mode: cfg.deep ? 'deep' : 'fast',
           translator: cfg.local ? 'local' : 'cloud',
+          asr: cfg.cloudAsr ? 'cloud' : 'local',
           duration: Math.round((S.video && S.video.duration) || 0)
         }
       });
@@ -393,7 +395,7 @@
       const d = await api('/api/jobs/' + S.job);
       setEngine(true);
       if (S.overlay && d.source) {
-        S.overlay.setBadge(d.source === 'native' ? 'official subs' : (d.source === 'wyzie' ? 'library subs' : 'AI subs'));
+        S.overlay.setBadge(d.source === 'native' ? 'official subs' : (d.source === 'wyzie' ? 'library subs' : (d.source === 'cloud' ? 'cloud subs' : 'AI subs')));
       }
       setStatus(d.stage + (d.error ? ' — ' + d.error : ''), d.status === 'error');
       setProgress(d.progress || 0);

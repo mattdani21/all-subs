@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import captions
+import cloud_asr
 import providers
 
 PORT = int(os.environ.get("ALLSUBS_PORT", "8765"))
@@ -66,7 +67,8 @@ def _local_available():
 
 class Job(object):
     def __init__(self, job_id, url, target="en", mode="fast", limit=None,
-                 translator="cloud", duration_hint=None):
+                 translator="cloud", duration_hint=None, asr="local",
+                 skip_library=False):
         self.id = job_id
         self.url = url
         self.target = target
@@ -74,6 +76,8 @@ class Job(object):
         self.limit = limit
         self.translator = translator
         self.duration_hint = duration_hint
+        self.asr = asr
+        self.skip_library = skip_library
         self.title = ""
         self.duration = 0.0
         self.status = "queued"
@@ -118,6 +122,7 @@ class Job(object):
                 "synopsis": self.synopsis, "mode": self.mode,
                 "translator": self.translator,
                 "duration_hint": self.duration_hint,
+                "asr": self.asr,
             }
 
     def cue_payload(self, start=0, limit=400):
@@ -195,7 +200,8 @@ def _run_job(job):
         return
 
     # 2. search public subtitle libraries before doing any ASR
-    if job.duration_hint and job.duration_hint > 300 and job.translator != "local":
+    if (job.duration_hint and job.duration_hint > 300 and not job.skip_library
+            and job.translator != "local"):
         job.set(status="searching", stage="Searching subtitle libraries", progress=0.08)
         try:
             found = providers.find(job.title, job.duration_hint, job.target)
@@ -245,6 +251,21 @@ def _run_job(job):
     lang = captions.detect_language(wav, total) or "auto"
     job.set(lang=lang)
     log("job %s: language %s" % (job.id, lang))
+
+    if job.asr == "cloud" and cloud_asr.available():
+        try:
+            _cloud_pass(job, chunks, lang)
+            job.set(status="done", stage="Captions ready (cloud)", progress=1.0,
+                    source="cloud")
+            job.to_disk()
+            _cache(job)
+            log("job %s: done (cloud), %d cues" % (job.id, len(job.cues)))
+            return
+        except Exception as exc:
+            log("job %s: cloud pass failed (%s); falling back to local" % (job.id, exc))
+            with job.lock:
+                job.cues = []
+                job.version += 1
 
     timings = {"asr": 0.0, "translate": 0.0, "deep": 0.0}
     pending = queue.Queue(maxsize=3)
@@ -329,6 +350,38 @@ def _run_job(job):
     _cache(job)
     log("job %s: done, %d cues (asr %.0fs, translate %.0fs, deep %.0fs)" % (
         job.id, len(job.cues), timings["asr"], timings["translate"], timings["deep"]))
+
+
+def _cloud_pass(job, chunks, lang):
+    """One multimodal call per chunk, several chunks at once."""
+    t0 = time.time()
+    done = [0]
+    cost = [0.0]
+
+    def work(item):
+        idx, (path, offset, length) = item
+        cues, usage = cloud_asr.transcribe_chunk(path, lang, job.target)
+        for c in cues:
+            c["start"] = round(c["start"] + offset, 3)
+            c["end"] = round(c["end"] + offset, 3)
+        return cues, usage
+
+    job.set(status="asr", stage="Cloud captioning 0/%d" % len(chunks), progress=0.1)
+    items = list(enumerate(chunks))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for cues, usage in pool.map(work, items):
+            if cues:
+                job.add_cues(cues)
+            done[0] += 1
+            try:
+                cost[0] += float(usage.get("cost") or 0)
+            except (TypeError, ValueError):
+                pass
+            job.set(stage="Cloud captioning %d/%d" % (done[0], len(chunks)),
+                    progress=0.1 + 0.85 * done[0] / max(len(chunks), 1))
+            job.to_disk()
+    log("job %s: cloud pass %.0fs, %d cues, $%.3f" % (
+        job.id, time.time() - t0, len(job.cues), cost[0]))
 
 
 def _translate_local(job):
@@ -435,15 +488,20 @@ def _cache(job):
     captions.save_cache(job.id, snap)
 
 
-def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=None):
-    key = captions.url_key(url, target if translator == "cloud" else target + "|" + translator)
+def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=None,
+                  asr="local", skip_library=False):
+    suffix = "" if translator == "cloud" else "|" + translator
+    if asr != "local":
+        suffix += "|" + asr
+    key = captions.url_key(url, target + suffix)
     with JOBS_LOCK:
         job = JOBS.get(key)
         if job and job.status not in ("error", "cancelled"):
             return job, False
         cached = captions.load_cache(key)
         if cached and cached.get("cues") and cached.get("status") == "done":
-            job = Job(key, url, target, mode, limit, translator, duration_hint)
+            job = Job(key, url, target, mode, limit, translator, duration_hint, asr,
+                      skip_library)
             job.title = cached.get("title") or ""
             job.duration = cached.get("duration") or 0
             job.source = cached.get("source")
@@ -458,7 +516,8 @@ def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=No
             JOBS[key] = job
             log("job %s: served from cache" % key)
             return job, False
-        job = Job(key, url, target, mode, limit, translator, duration_hint)
+        job = Job(key, url, target, mode, limit, translator, duration_hint, asr,
+                  skip_library)
         JOBS[key] = job
     threading.Thread(target=run_job, args=(job,), daemon=True).start()
     return job, True
@@ -623,8 +682,11 @@ class Handler(BaseHTTPRequestHandler):
             limit = body.get("limit")
             translator = body.get("translator") or "cloud"
             duration_hint = body.get("duration") or None
+            asr = body.get("asr") or "local"
+            skip_library = bool(body.get("skip_library"))
             job, created = get_or_create(url, target, mode, limit, translator,
-                                         float(duration_hint) if duration_hint else None)
+                                         float(duration_hint) if duration_hint else None,
+                                         asr, skip_library)
             log("%s job %s for %s (%s)" % ("created" if created else "reused",
                                            job.id, url[:80], target))
             return self._send(200, dict(job.snapshot(), created=created))

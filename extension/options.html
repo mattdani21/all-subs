@@ -69,6 +69,8 @@
     <label>Wyzie key — optional, enables existing-subtitle lookup</label>
     <input type="password" id="wyzie" placeholder="wyzie-… (leave blank to keep current)">
     <div class="hint">Get a free Wyzie key at store.wyzie.io/redeem — 1,000 lookups/day.</div>
+    <div class="hint">Fast cloud captioning uses OpenRouter (Gemini Flash) and needs credit:
+      roughly $0.30 per feature film. It falls back to local whisper if the call fails.</div>
     <div class="hint">If the engine already has a key from <code>~/.hermes/.env</code>, you can leave this blank.</div>
   </section>
 
@@ -89,6 +91,7 @@
       <label class="check"><input type="checkbox" id="bilingual"> Bilingual subtitles</label>
       <label class="check"><input type="checkbox" id="deep"> Deep read by default</label>
       <label class="check"><input type="checkbox" id="local"> Translate offline (16 GB+)</label>
+      <label class="check"><input type="checkbox" id="cloud"> Fast cloud captioning — audio leaves this Mac</label>
     </div>
   </section>
 

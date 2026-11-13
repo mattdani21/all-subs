@@ -11,18 +11,20 @@ it that night.
 
 ## It's a router
 
-Every request walks three rungs, cheapest first, and only falls through when the rung
+Every request walks four rungs, cheapest first, and only falls through when the rung
 above fails its gate:
 
 | rung | what happens | measured |
 |---|---|---|
 | **1. retrieve** | existing track via Wikidata → IMDb → Wyzie | **~8 s**, 1,072 cues |
-| **2. generate** | whisper.cpp + DeepSeek when nothing usable exists | 11–17 min for 116 min |
-| **3. local** | Qwen3-4B on the machine, nothing leaves it | fine on 16 GB+, too slow on 8 GB |
+| **2. cloud** | audio chunk → one multimodal call → translated cues | 4.9 s per 60 s clip, ~$0.30/film |
+| **3. local ASR** | whisper.cpp + DeepSeek on the cue text | 11–17 min for 116 min |
+| **4. fully local** | whisper.cpp + Qwen3-4B, nothing leaves the machine | fine on 16 GB+, slow on 8 GB |
 
 The gates are the product: a retrieved track must span the film (my first one ran 22
-minutes past the credits), generation needs a translation key, local needs RAM. The
-overlay badge tells you which rung answered — *library subs*, *AI subs*, or *official*.
+minutes past the credits), cloud needs credit and tolerable timestamps, local ASR needs a
+translation key, fully-local needs RAM. The overlay badge tells you which rung answered —
+*library subs*, *cloud subs*, *AI subs*, or *official*.
 
 ## How it works
 
