@@ -9,6 +9,21 @@ whisper.cpp and translate it with an LLM.
 Built because a Chinese film on bilibili.tv had no subtitle track and I wanted to watch
 it that night.
 
+## It's a router
+
+Every request walks three rungs, cheapest first, and only falls through when the rung
+above fails its gate:
+
+| rung | what happens | measured |
+|---|---|---|
+| **1. retrieve** | existing track via Wikidata → IMDb → Wyzie | **~8 s**, 1,072 cues |
+| **2. generate** | whisper.cpp + DeepSeek when nothing usable exists | 11–17 min for 116 min |
+| **3. local** | Qwen3-4B on the machine, nothing leaves it | fine on 16 GB+, too slow on 8 GB |
+
+The gates are the product: a retrieved track must span the film (my first one ran 22
+minutes past the credits), generation needs a translation key, local needs RAM. The
+overlay badge tells you which rung answered — *library subs*, *AI subs*, or *official*.
+
 ## How it works
 
 ```
