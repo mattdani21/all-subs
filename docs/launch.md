@@ -1,97 +1,120 @@
-# Launch copy
+# Launch copy — the routing story
 
 Repo: https://github.com/mattdani21/all-subs
-Hero image: `docs/hero.png` (attach it — posts with an image get far more reach)
+Hero image: `docs/hero.png`
+
+Thesis: **retrieve → generate → local.** Each rung is cheaper or more private than the one
+below it, and a gate decides whether that rung's answer is trustworthy.
 
 ---
 
 ## LinkedIn
 
-Chinese films on bilibili often ship with no subtitle track at all. I wanted to watch one,
-so I built the thing I wanted: a Chrome extension that captions any video.
+Most AI features have one setting: generate. Mine has three, and it only generates when it
+has to.
 
-How it works:
+I built a Chrome extension that captions any video. Underneath, it's a router:
 
-1. It looks for existing subtitles first. Title + year → Wikidata → IMDb id → subtitle
-   library, with a timing gate that rejects tracks which don't span the film. On the
-   116-minute test film that path returns 1,072 cues in about 8 seconds.
-2. Only if nothing usable exists does it transcribe. whisper.cpp on the Mac, 5-minute
-   chunks, hallucination filtering, then an LLM translates each cue while the next chunk
-   is still being transcribed.
-3. An optional "deep pass" makes the model read the whole film first — synopsis, character
-   names, register — then re-translate every line with that context.
+**Rung 1 — retrieve.** If someone already made the thing, use it. Title + year → Wikidata →
+IMDb → subtitle library, with a gate that rejects tracks which don't span the film. On a
+116-minute film that returns 1,072 cues in about 8 seconds. Often better than what a model
+would produce, because a human translated it.
 
-Things I didn't expect to spend time on:
+**Rung 2 — generate.** Nothing usable? Now spend compute. whisper.cpp transcribes the
+audio locally in five-minute chunks, an LLM translates each cue while the next chunk is
+still being transcribed. 11–17 minutes for the same film.
 
-- Whisper confidently repeating "Thank you" over a film score. The fix was disabling
-  cross-window conditioning, not a bigger model.
-- Subtitle libraries happily returning the wrong film. My first IMDb guess gave a heist
-  movie's subtitles on a 116-minute film; the last line landed 22 minutes after the credits.
-  The duration gate now rejects that automatically.
-- An HTTPS page cannot fetch http://127.0.0.1. Every API call goes through the extension's
-  service worker instead.
+**Rung 3 — local.** If you don't want the text leaving the machine at all, a 4B model runs
+on the laptop. Slower, flatter prose, but it's yours. Runs properly on 16 GB+.
 
-Measured honestly: the library path is ~8 seconds, full transcription is 11–17 minutes on
-an M3, and whisper is 94–97% of that time. Greedy decoding, quantised models and parallel
-chunks all changed nothing. The only real speed-up was not transcribing.
+The interesting part isn't the models. It's the gates between rungs:
 
-It's open source (MIT). It still needs a Mac and a terminal to install, which is the next
-thing to fix.
+- A retrieved subtitle must span 70–105% of the runtime, or it's rejected. My first IMDb
+  guess gave a heist film's subtitles on a 116-minute movie — the last line landed 22
+  minutes after the credits. That's what the gate is for.
+- Generation needs a key and a speech model; the panel says which one is missing instead
+  of failing silently.
+- Local needs RAM; the toggle disables itself below 16 GB because whisper and the 4B model
+  can't share 8 GB.
 
-Repo: https://github.com/mattdani21/all-subs
+Routing is the feature. Retrieval, generation and local compute have completely different
+cost, latency and privacy curves, and pretending one of them is the answer is how you end
+up paying a model to redo work someone already did.
 
-If you watch foreign films, I'd love to know what breaks.
+Open source, MIT. Still needs a Mac and a terminal to install — that's next.
+
+https://github.com/mattdani21/all-subs
 
 ---
 
-## X / Twitter thread
+## X thread
 
 1/
-I wanted to watch a Chinese film with no subtitles.
-So I built a Chrome extension that captions any video — finds existing subs first,
-otherwise transcribes and translates locally.
-Open source, MIT.
+Every AI feature I build now starts with a router, not a model.
 
-https://github.com/mattdani21/all-subs
+Three rungs: retrieve → generate → local.
+
+My captioning extension is the cleanest example. (repo at the end)
 
 2/
-The fastest caption is one that already exists.
+Rung 1: retrieve.
 
-Title + year → Wikidata → IMDb → subtitle library returned 1,072 cues in 8 seconds.
-Full ASR of the same film: 17 minutes.
+Title + year → Wikidata → IMDb → subtitle library.
+1,072 cues in 8 seconds.
 
-So the pipeline searches before it generates.
+Someone already did the work. Don't pay a model to redo it.
 
 3/
-When it does transcribe:
-• whisper.cpp large-v3-turbo, 5-minute chunks
-• -mc 0, because prompt conditioning made it loop "Thank you" over music
-• cue text goes to DeepSeek, audio never leaves the Mac
+Rung 2: generate.
+
+Nothing usable → whisper.cpp transcribes locally, an LLM translates while the next chunk
+is still being transcribed.
+
+17 minutes for a 116-minute film. Only now do we spend compute.
 
 4/
-The safety detail that mattered most:
+Rung 3: local.
 
-Subtitle libraries return the wrong release all the time. My first IMDb guess gave a heist
-film's subs whose last line landed 22 minutes after the credits.
+Privacy switch: a 4B model on the machine, nothing leaves it.
 
-Gate: a track must span 70–105% of the runtime, or it's rejected and we transcribe.
+Slower and flatter prose. But it's yours, and it works on a plane.
 
 5/
-Rough edges, honestly:
-• macOS + terminal install
-• whisper is 94% of runtime
-• YouTube blocks yt-dlp
+The models aren't the hard part. The gates are.
 
-Next: signed Mac app so installing isn't a command line.
+• retrieved subs must span 70–105% of the film (my first guess ran 22 min past the credits)
+• generation needs a key
+• local needs 16 GB+
+
+A router is gates, not if-statements.
+
+6/
+Open source, MIT. macOS, terminal install, rough edges documented.
 
 https://github.com/mattdani21/all-subs
+
+---
+
+## Short variant
+
+Most AI products jump straight to generation.
+
+All Subs is a router with three rungs:
+
+1. retrieve — existing subtitles, 8 seconds
+2. generate — whisper + LLM, 17 minutes
+3. local — 4B model, nothing leaves your Mac
+
+Each rung has a gate that decides if its answer is trustworthy. Routing is the feature.
+
+MIT, link below.
 
 ---
 
 ## Notes
 
-- Post LinkedIn Tue–Thu, 08:00–09:30 SAST; X threads do better around 15:00–17:00 SAST.
-- Attach `docs/hero.png`, not the diagram, as the first image.
-- Don't claim real-time or Netflix support; the post above doesn't.
-- If someone asks "why not just use X", the answer is in the README: library first, local
-  ASR fallback, whole-film context pass.
+- Attach `docs/hero.png`. It shows the *retrieved* track, which fits rung 1.
+- "22 minutes past the credits" is the most quotable line — spin it into its own follow-up
+  post if the launch gets any traction.
+- Don't claim real-time, DRM, or "any site"; the README lists the limits.
+- Post LinkedIn Tue–Thu 08:00–09:30 SAST; X thread 15:00–17:00 SAST.
