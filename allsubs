@@ -1,6 +1,8 @@
 #!/bin/bash
 # All Subs engine control: ./allsubs setup|doctor|start|stop|status|logs
 set -uo pipefail
+# never inherit a foreign virtualenv's site-packages
+unset PYTHONPATH PYTHONHOME 2>/dev/null || true
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PIDFILE="$ROOT/.engine.pid"
 LOG="$HOME/.allsubs/engine.log"
