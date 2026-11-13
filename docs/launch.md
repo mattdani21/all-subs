@@ -37,9 +37,10 @@ The interesting part isn't the models. It's the gates:
 - A retrieved subtitle must cover 70–105% of the runtime. My first IMDb guess gave a heist
   film's subtitles on a 116-minute movie — the last line landed 22 minutes after the
   credits. That's what the gate is for.
-- The cloud rung needs credit and returns coarser timestamps, so cue density is checked
-  before it's trusted; if the call fails, the job falls through to local whisper instead of
-  dying. That happened during testing — a 402 fell back and finished.
+- The cloud rung needs credit and returns coarser timestamps, so every cue is sanity-checked
+  (duration bounds, ordering) before it's trusted; if the call fails, the job falls through
+  to local whisper instead of dying. That happened during testing — a 402 fell back and
+  finished.
 - Local needs RAM; the toggle disables itself below 16 GB because whisper and the 4B model
   can't share 8 GB.
 
