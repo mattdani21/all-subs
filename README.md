@@ -81,6 +81,27 @@ Click it (or press `Alt+Shift+A`) → *Caption this video*.
 Jobs are keyed by URL+target and cached in `~/.allsubs/cache`, so revisiting a film
 is instant and offline.
 
+## Subtitle libraries
+
+Before any ASR, the engine resolves the film and looks for an existing English (or target
+language) track:
+
+```
+title + year --Wikidata--> IMDb id --Wyzie--> .vtt --sync gate--> cues
+```
+
+- Resolution needs no key (Wikidata is open). Wyzie needs a free key (1,000/day):
+  `WYZIE_API_KEY` in `~/AllSubs/.env`.
+- A track is accepted only if it spans the film: it must end inside 70-105% of the
+  known duration and start in the first third. Wrong-release subtitles are rejected
+  and the job falls back to ASR.
+- The free tier injects one ad cue at 00:00; it is stripped.
+- The browser sends `video.duration` with the job, because site metadata often has no
+  duration until media downloads.
+
+Measured on the 116-minute test film: **1,072 cues in ~8 seconds**, versus ~17 minutes
+of ASR. That is the difference between "search" and "generate".
+
 ## Speed
 
 - Chunks are 60 s / 120 s / then 300 s, so the first caption lands about a minute in

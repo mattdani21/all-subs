@@ -346,7 +346,8 @@
         method: 'POST',
         body: {
           url: url, target: cfg.target, mode: cfg.deep ? 'deep' : 'fast',
-          translator: cfg.local ? 'local' : 'cloud'
+          translator: cfg.local ? 'local' : 'cloud',
+          duration: Math.round((S.video && S.video.duration) || 0)
         }
       });
       S.job = job.id;
@@ -383,7 +384,7 @@
       const d = await api('/api/jobs/' + S.job);
       setEngine(true);
       if (S.overlay && d.source) {
-        S.overlay.setBadge(d.source === 'native' ? 'official subs' : 'AI subs');
+        S.overlay.setBadge(d.source === 'native' ? 'official subs' : (d.source === 'wyzie' ? 'library subs' : 'AI subs'));
       }
       setStatus(d.stage + (d.error ? ' — ' + d.error : ''), d.status === 'error');
       setProgress(d.progress || 0);

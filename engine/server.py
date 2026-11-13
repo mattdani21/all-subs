@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import captions
+import providers
 
 PORT = int(os.environ.get("ALLSUBS_PORT", "8765"))
 MAX_WORKERS = 2
@@ -49,13 +50,15 @@ def _local_available():
 
 
 class Job(object):
-    def __init__(self, job_id, url, target="en", mode="fast", limit=None, translator="cloud"):
+    def __init__(self, job_id, url, target="en", mode="fast", limit=None,
+                 translator="cloud", duration_hint=None):
         self.id = job_id
         self.url = url
         self.target = target
         self.mode = mode
         self.limit = limit
         self.translator = translator
+        self.duration_hint = duration_hint
         self.title = ""
         self.duration = 0.0
         self.status = "queued"
@@ -99,6 +102,7 @@ class Job(object):
                 "pass2": self.pass2, "error": self.error,
                 "synopsis": self.synopsis, "mode": self.mode,
                 "translator": self.translator,
+                "duration_hint": self.duration_hint,
             }
 
     def cue_payload(self, start=0, limit=400):
@@ -175,7 +179,37 @@ def _run_job(job):
         _cache(job)
         return
 
-    # 2. no usable track -> transcribe locally
+    # 2. search public subtitle libraries before doing any ASR
+    if job.duration_hint and job.duration_hint > 300 and job.translator != "local":
+        job.set(status="searching", stage="Searching subtitle libraries", progress=0.08)
+        try:
+            found = providers.find(job.title, job.duration_hint, job.target)
+        except Exception as exc:
+            found = None
+            log("job %s: provider error: %s" % (job.id, exc))
+        if found and found.get("rejected"):
+            log("job %s: provider rejected track %s (%s)" % (
+                job.id, found.get("imdb"), found.get("note")))
+        elif found:
+            cues = found["cues"]
+            if job.target and (found.get("lang") or "").startswith(job.target):
+                for c in cues:
+                    c["dst"] = c["src"]
+            else:
+                translated = captions.translate_cues(
+                    cues, job.target, {"title": job.title})
+                for c in cues:
+                    c["dst"] = translated.get(c["i"], c["src"])
+            job.add_cues(cues)
+            job.set(status="done", stage="Captions ready (library)", progress=1.0,
+                    source="wyzie", lang=found.get("lang"), duration=job.duration_hint)
+            job.to_disk()
+            _cache(job)
+            log("job %s: used library track %s (%s)" % (
+                job.id, found.get("imdb"), found.get("note")))
+            return
+
+    # 3. no usable track -> transcribe locally
     job.set(status="audio", stage="Downloading audio", progress=0.05)
     workdir = os.path.join(captions.JOBS_DIR, job.id + "_work")
     os.makedirs(workdir, exist_ok=True)
@@ -386,7 +420,7 @@ def _cache(job):
     captions.save_cache(job.id, snap)
 
 
-def get_or_create(url, target, mode, limit, translator="cloud"):
+def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=None):
     key = captions.url_key(url, target if translator == "cloud" else target + "|" + translator)
     with JOBS_LOCK:
         job = JOBS.get(key)
@@ -394,7 +428,7 @@ def get_or_create(url, target, mode, limit, translator="cloud"):
             return job, False
         cached = captions.load_cache(key)
         if cached and cached.get("cues") and cached.get("status") == "done":
-            job = Job(key, url, target, mode, limit, translator)
+            job = Job(key, url, target, mode, limit, translator, duration_hint)
             job.title = cached.get("title") or ""
             job.duration = cached.get("duration") or 0
             job.source = cached.get("source")
@@ -409,7 +443,7 @@ def get_or_create(url, target, mode, limit, translator="cloud"):
             JOBS[key] = job
             log("job %s: served from cache" % key)
             return job, False
-        job = Job(key, url, target, mode, limit, translator)
+        job = Job(key, url, target, mode, limit, translator, duration_hint)
         JOBS[key] = job
     threading.Thread(target=run_job, args=(job,), daemon=True).start()
     return job, True
@@ -555,7 +589,9 @@ class Handler(BaseHTTPRequestHandler):
             mode = body.get("mode") or "fast"
             limit = body.get("limit")
             translator = body.get("translator") or "cloud"
-            job, created = get_or_create(url, target, mode, limit, translator)
+            duration_hint = body.get("duration") or None
+            job, created = get_or_create(url, target, mode, limit, translator,
+                                         float(duration_hint) if duration_hint else None)
             log("%s job %s for %s (%s)" % ("created" if created else "reused",
                                            job.id, url[:80], target))
             return self._send(200, dict(job.snapshot(), created=created))
