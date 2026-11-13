@@ -296,6 +296,14 @@
       const t = S.root.querySelector('[data-el="title"]');
       t.textContent = S.video ? (document.title || 'This page') : 'No video found';
       checkHealth();
+      // warm the router while the user reads the panel: probe + library lookup
+      if (S.video && S.video.duration) {
+        api('/api/prefetch', {
+          method: 'POST',
+          body: { url: location.href, target: cfg.target,
+                  duration: Math.round(S.video.duration) }
+        }).catch(function () {});
+      }
     }
   }
 

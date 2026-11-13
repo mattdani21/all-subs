@@ -22,6 +22,7 @@ MAX_WORKERS = 2
 VERSION = "0.2.0"
 
 JOBS = {}
+PREFETCH = {}
 JOBS_LOCK = threading.Lock()
 SEM = threading.Semaphore(MAX_WORKERS)
 LOG_PATH = os.path.join(captions.DATA_DIR, "engine.log")
@@ -167,7 +168,26 @@ def _run_job(job):
     job.set(status="probing", stage="Reading page")
     log("job %s: probing %s" % (job.id, job.url))
 
-    meta = captions.probe(job.url)
+    pre = PREFETCH.get(job.id)
+    if pre and time.time() - pre["at"] < 900:
+        job.set(title=pre.get("title") or "", duration=pre.get("duration") or 0)
+        if pre.get("found") and pre["found"].get("cues"):
+            cues = pre["found"]["cues"]
+            for c in cues:
+                c["dst"] = c["src"]
+            job.add_cues(cues)
+            job.set(status="done", stage="Captions ready (library)", progress=1.0,
+                    source="wyzie", lang=pre["found"].get("lang"),
+                    duration=pre.get("duration") or 0)
+            job.to_disk()
+            _cache(job)
+            log("job %s: prefetched library track (%d cues)" % (job.id, len(cues)))
+            return
+        meta = {"title": pre.get("title") or "", "duration": pre.get("duration") or 0,
+                "subtitles": {}, "automatic_captions": {}}
+        log("job %s: using prefetched metadata" % job.id)
+    else:
+        meta = captions.probe(job.url)
     job.set(title=meta["title"], duration=meta["duration"] or 0)
     log("job %s: %s (%ss) native subs=%s" % (
         job.id, meta["title"], meta["duration"], list(meta["subtitles"].keys())))
@@ -230,27 +250,61 @@ def _run_job(job):
                 job.id, found.get("imdb"), found.get("note")))
             return
 
-    # 3. no usable track -> transcribe locally
-    job.set(status="audio", stage="Downloading audio", progress=0.05)
+    # 3. no usable track -> transcribe, starting with the opening minutes
+    job.set(status="audio", stage="Fetching audio", progress=0.05)
     workdir = os.path.join(captions.JOBS_DIR, job.id + "_work")
     os.makedirs(workdir, exist_ok=True)
-    audio = captions.download_audio(job.url, workdir, job.id)
-    wav = captions.to_wav(audio, os.path.join(workdir, "audio.wav"))
-    total = captions.duration_of(wav)
-    if job.limit:
-        total = min(total, float(job.limit))
-        job.set(duration=total)
 
-    job.set(duration=total)
-    chunks = captions.split_wav(wav, workdir, limit=job.limit, schedule=[60, 120, 300])
-    job.set(status="asr", stage="Transcribing 0/%d" % len(chunks), progress=0.1,
-            source="asr")
-    log("job %s: %d chunks (first %ss), %.0fs audio" % (
-        job.id, len(chunks), chunks[0][2] if chunks else 0, total))
+    full = {}
 
-    lang = captions.detect_language(wav, total) or "auto"
-    job.set(lang=lang)
-    log("job %s: language %s" % (job.id, lang))
+    def fetch_full():
+        try:
+            full["path"] = captions.download_audio(job.url, workdir, job.id)
+        except Exception as exc:  # reported after the opening is captioned
+            full["error"] = exc
+
+    dl = threading.Thread(target=fetch_full, daemon=True)
+    dl.start()
+
+    prefix = None
+    if job.asr != "cloud":
+        try:
+            prefix = captions.download_audio_range(job.url, workdir, 120)
+        except Exception as exc:
+            log("job %s: section fetch failed (%s); using the full download" % (job.id, exc))
+
+    if prefix:
+        total = float(job.duration_hint or 0) or 120.0
+        if job.limit:
+            total = min(total, float(job.limit))
+        code, conf = captions.detect_language(prefix, min(total, 120.0),
+                                              window_span=min(total, 120.0))
+        if not code or conf < 0.85:
+            log("job %s: opening language uncertain (%s p=%.2f); waiting for full audio" % (
+                job.id, code, conf))
+            prefix = None
+    if prefix:
+        lang = code
+        chunks = captions.split_wav(prefix, workdir, limit=job.limit, schedule=[30, 90])
+        job.set(lang=lang, duration=total, status="asr",
+                stage="Transcribing the opening", progress=0.1, source="asr")
+        log("job %s: opening ready (%ss), language %s" % (
+            job.id, chunks[0][2] if chunks else 0, lang))
+    else:
+        dl.join()
+        audio = full.get("path")
+        if not audio:
+            raise RuntimeError("audio download failed: %s" % full.get("error"))
+        total = captions.duration_of(audio)
+        if job.limit:
+            total = min(total, float(job.limit))
+        lang, _conf = captions.detect_language(audio, total)
+        lang = lang or "auto"
+        chunks = captions.split_wav(audio, workdir, limit=job.limit,
+                                    schedule=[30, 90, 180, 300])
+        job.set(lang=lang, duration=total, status="asr",
+                stage="Transcribing 0/%d" % len(chunks), progress=0.1, source="asr")
+        log("job %s: %d chunks, %.0fs audio" % (job.id, len(chunks), total))
 
     if job.asr == "cloud" and cloud_asr.available():
         try:
@@ -269,7 +323,6 @@ def _run_job(job):
 
     timings = {"asr": 0.0, "translate": 0.0, "deep": 0.0}
     pending = queue.Queue(maxsize=3)
-    state = {"done": 0}
     last_src = [""]
 
     def translate_worker():
@@ -297,32 +350,48 @@ def _run_job(job):
                 last_src[0] = cues[-1]["src"]
             job.add_cues(cues)
             timings["translate"] += time.time() - t0
-            job.set(stage="%d/%d transcribed \u00b7 %d cues" % (
-                state["done"], len(chunks), len(job.cues)))
+            job.set(stage="Transcribing \u00b7 %d cues" % len(job.cues))
             job.to_disk()
             pending.task_done()
 
-    worker = threading.Thread(target=translate_worker, daemon=True)
-    worker.start()
-    try:
-        for idx, (path, offset, length) in enumerate(chunks):
+    def process(chunk_list):
+        for idx, (path, offset, length) in enumerate(chunk_list):
             if job.status == "cancelled":
                 return
             t0 = time.time()
             silences = captions.silence_intervals(path)
             cues, _detected = captions.transcribe_chunk(
-                path, os.path.join(workdir, "c%03d" % idx), lang)
+                path, os.path.join(workdir, "c%03d" % (idx + 1)), lang)
             cues = captions.filter_segments(cues, silences, lang)
             for c in cues:
                 c["start"] = round(c["start"] + offset, 3)
                 c["end"] = round(c["end"] + offset, 3)
             cues = captions.split_display(cues)
             timings["asr"] += time.time() - t0
-            state["done"] = idx + 1
             if cues:
                 pending.put(cues)
-            job.set(stage="Transcribing %d/%d" % (idx + 1, len(chunks)),
-                    progress=0.1 + 0.8 * (idx + 1) / len(chunks))
+            job.set(stage="Transcribing %d cues" % (len(job.cues) + len(cues)),
+                    progress=min(0.1 + 0.8 * (offset + length) / max(total, 1), 0.9))
+
+    worker = threading.Thread(target=translate_worker, daemon=True)
+    worker.start()
+    try:
+        process(chunks)
+        if prefix:
+            dl.join()
+            audio = full.get("path")
+            if not audio:
+                log("job %s: full download failed: %s" % (job.id, full.get("error")))
+            else:
+                if not total:
+                    total = captions.duration_of(audio)
+                    job.set(duration=total)
+                rest = captions.split_wav(audio, workdir, limit=job.limit,
+                                          start_at=120.0, first_index=100,
+                                          schedule=[300])
+                if rest:
+                    log("job %s: continuing with %d chunks from 120s" % (job.id, len(rest)))
+                    process(rest)
     finally:
         pending.put(None)
         pending.join()
@@ -653,6 +722,33 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode() or "{}")
         except ValueError:
             return self._send(400, {"error": "bad json"})
+
+        if parsed.path == "/api/prefetch":
+            url = (body.get("url") or "").strip()
+            target = body.get("target") or "en"
+            duration = float(body.get("duration") or 0)
+            if not url:
+                return self._send(400, {"error": "url required"})
+            key = captions.url_key(url, target)
+            if key in PREFETCH and time.time() - PREFETCH[key]["at"] < 900:
+                return self._send(200, {"ok": True, "cached": True})
+
+            def warm():
+                try:
+                    meta = captions.probe(url)
+                    found = None
+                    if duration > 300:
+                        found = providers.find(meta["title"], duration, target)
+                        if found and found.get("rejected"):
+                            found = None
+                    PREFETCH[key] = {"at": time.time(), "title": meta["title"],
+                                     "duration": duration, "found": found}
+                    log("prefetch %s: %s" % (key, "library track" if found else "no track"))
+                except Exception as exc:
+                    log("prefetch %s failed: %s" % (key, exc))
+
+            threading.Thread(target=warm, daemon=True).start()
+            return self._send(200, {"ok": True, "started": True})
 
         if parsed.path == "/api/config":
             cfg = captions.load_config()

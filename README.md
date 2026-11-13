@@ -67,11 +67,19 @@ Add keys in the extension's **Settings** page, or drop them in `~/AllSubs/.env`:
 
 116-minute film on an M3 (8 GB):
 
-| path | time |
+| what | time |
 |---|---|
-| library subtitles found | **~8 s** |
-| full ASR + translation | ~11–17 min (depends on machine load) |
+| library track, after the panel warms | **0.01 s** |
+| library track, cold | ~8 s |
+| first caption, opening has dialogue | ~20 s |
+| first caption, opening is music/rain | ~80 s |
+| full ASR + translation | 11–17 min |
 | repeat view | instant (cached) |
+
+The panel starts resolving the title, checking libraries and fetching the opening two
+minutes as soon as it opens, so by the time you press *Caption this video* most of the
+latency is already spent. Chunks are 30 s / 90 s / 180 s / 300 s, so the first lines land
+long before the film is finished.
 
 ASR is the floor: whisper large-v3-turbo runs ~7–13× realtime and accounts for 94–97% of
 wall time. Greedy decoding, quantised models, flash attention and parallel chunks were all

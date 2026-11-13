@@ -173,6 +173,18 @@ def download_native_subs(url, lang, dest_base):
 
 # ---------------------------------------------------------------- media
 
+def download_audio_range(url, workdir, seconds=120, timeout=300):
+    """Fetch only the opening seconds (yt-dlp sections), for first-caption latency."""
+    out = os.path.join(workdir, "prefix.%(ext)s")
+    run([YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best",
+         "--download-sections", "*0-%d" % int(seconds), "-o", out, url],
+        timeout=timeout)
+    for name in os.listdir(workdir):
+        if name.startswith("prefix."):
+            return os.path.join(workdir, name)
+    raise RuntimeError("section download produced no file")
+
+
 def download_audio(url, workdir, key=None):
     media_cache = os.path.join(CACHE_DIR, "media")
     os.makedirs(media_cache, exist_ok=True)
@@ -208,16 +220,17 @@ def to_wav(src, dst):
     return dst
 
 
-def split_wav(wav, workdir, chunk_seconds=CHUNK_SECONDS, limit=None, schedule=None):
-    """Split the wav into chunks; `schedule` overrides the first chunk sizes."""
+def split_wav(wav, workdir, chunk_seconds=CHUNK_SECONDS, limit=None, schedule=None,
+              start_at=0.0, first_index=0):
+    """Split audio into chunks; `schedule` overrides the first sizes."""
     total = duration_of(wav)
     if limit:
         total = min(total, float(limit))
     if total <= 0:
         raise RuntimeError("could not read audio duration")
     out = []
-    start = 0.0
-    idx = 0
+    start = float(start_at)
+    idx = first_index
     while start < total - 0.01:
         want = schedule[idx] if schedule and idx < len(schedule) else chunk_seconds
         length = min(want, total - start)
@@ -367,11 +380,13 @@ def filter_segments(segs, silences, lang=None):
     return out
 
 
-def detect_language(wav, total):
-    """Majority language vote on three loud windows across the film."""
+def detect_language(wav, total, window_span=None):
+    """Language vote on three windows; returns (code, mean confidence)."""
+    span = float(window_span or total or 0)
     votes = {}
+    conf = []
     for frac in (0.25, 0.55, 0.8):
-        start = max(0.0, total * frac - 15.0)
+        start = max(0.0, span * frac - 15.0)
         tmp = os.path.join(os.path.dirname(wav), "langprobe.wav")
         subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", "20",
                         "-i", wav, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", tmp],
@@ -379,13 +394,17 @@ def detect_language(wav, total):
         proc = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", tmp, "-dl", "-l", "auto"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               timeout=300)
-        m = re.search(r"auto-detected language:\s*([a-zA-Z-]+)", (proc.stdout or "") + (proc.stderr or ""))
+        blob = (proc.stdout or "") + (proc.stderr or "")
+        m = re.search(r"auto-detected language:\s*([a-zA-Z-]+)(?:\s*\(p = ([\d.]+)\))?", blob)
         if m:
             code = m.group(1).lower()
             votes[code] = votes.get(code, 0) + 1
+            if m.group(2):
+                conf.append(float(m.group(2)))
     if not votes:
-        return None
-    return max(votes.items(), key=lambda kv: kv[1])[0]
+        return None, 0.0
+    code = max(votes.items(), key=lambda kv: kv[1])[0]
+    return code, (sum(conf) / len(conf) if conf else 0.0)
 
 
 def transcribe_chunk(path, base, language="auto"):
