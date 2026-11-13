@@ -69,7 +69,7 @@ def _local_available():
 class Job(object):
     def __init__(self, job_id, url, target="en", mode="fast", limit=None,
                  translator="cloud", duration_hint=None, asr="local",
-                 skip_library=False):
+                 skip_library=False, media_url=None, title_hint=None, cookies=False):
         self.id = job_id
         self.url = url
         self.target = target
@@ -79,6 +79,9 @@ class Job(object):
         self.duration_hint = duration_hint
         self.asr = asr
         self.skip_library = skip_library
+        self.media_url = media_url
+        self.title_hint = title_hint
+        self.cookies = cookies
         self.title = ""
         self.duration = 0.0
         self.status = "queued"
@@ -168,6 +171,32 @@ def _run_job(job):
     job.set(status="probing", stage="Reading page")
     log("job %s: probing %s" % (job.id, job.url))
 
+    if job.title_hint:
+        job.set(title=job.title_hint)
+
+    # YouTube usually already has captions: use them instead of downloading audio
+    if captions.youtube_id(job.url):
+        job.set(status="searching", stage="Reading YouTube captions", progress=0.1)
+        yt = captions.youtube_cues(job.url, job.target)
+        if yt:
+            cues = captions.split_display([dict(c) for c in yt["cues"]])
+            if (yt.get("lang") or "").startswith(job.target):
+                for c in cues:
+                    c["dst"] = c["src"]
+            else:
+                translated = captions.translate_cues(
+                    cues, job.target, {"title": job.title})
+                for c in cues:
+                    c["dst"] = translated.get(c["i"], c["src"])
+            job.add_cues(cues)
+            job.set(status="done", stage="Captions ready (YouTube)", progress=1.0,
+                    source="youtube", lang=yt.get("lang"),
+                    duration=job.duration_hint or 0)
+            job.to_disk()
+            _cache(job)
+            log("job %s: youtube captions, %d cues" % (job.id, len(cues)))
+            return
+
     pre = PREFETCH.get(job.id)
     if pre and time.time() - pre["at"] < 900:
         job.set(title=pre.get("title") or "", duration=pre.get("duration") or 0)
@@ -187,8 +216,16 @@ def _run_job(job):
                 "subtitles": {}, "automatic_captions": {}}
         log("job %s: using prefetched metadata" % job.id)
     else:
-        meta = captions.probe(job.url)
-    job.set(title=meta["title"], duration=meta["duration"] or 0)
+        try:
+            meta = captions.probe(job.url, cookies=job.cookies)
+        except Exception as exc:
+            if not job.media_url:
+                raise
+            log("job %s: page probe failed (%s); using stream URL" % (job.id, exc))
+            meta = {"title": job.title_hint or "", "duration": 0, "subtitles": {},
+                    "automatic_captions": {}}
+    job.set(title=meta["title"] or job.title_hint or "",
+            duration=meta["duration"] or 0)
     log("job %s: %s (%ss) native subs=%s" % (
         job.id, meta["title"], meta["duration"], list(meta["subtitles"].keys())))
 
@@ -259,7 +296,8 @@ def _run_job(job):
 
     def fetch_full():
         try:
-            full["path"] = captions.download_audio(job.url, workdir, job.id)
+            full["path"] = captions.download_audio(
+                job.media_url or job.url, workdir, job.id, cookies=job.cookies)
         except Exception as exc:  # reported after the opening is captioned
             full["error"] = exc
 
@@ -269,7 +307,8 @@ def _run_job(job):
     prefix = None
     if job.asr != "cloud":
         try:
-            prefix = captions.download_audio_range(job.url, workdir, 120)
+            prefix = captions.download_audio_range(
+                job.media_url or job.url, workdir, 120, cookies=job.cookies)
         except Exception as exc:
             log("job %s: section fetch failed (%s); using the full download" % (job.id, exc))
 
@@ -558,7 +597,8 @@ def _cache(job):
 
 
 def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=None,
-                  asr="local", skip_library=False):
+                  asr="local", skip_library=False, media_url=None, title_hint=None,
+                  cookies=False):
     suffix = "" if translator == "cloud" else "|" + translator
     if asr != "local":
         suffix += "|" + asr
@@ -570,7 +610,7 @@ def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=No
         cached = captions.load_cache(key)
         if cached and cached.get("cues") and cached.get("status") == "done":
             job = Job(key, url, target, mode, limit, translator, duration_hint, asr,
-                      skip_library)
+                      skip_library, media_url, title_hint, cookies)
             job.title = cached.get("title") or ""
             job.duration = cached.get("duration") or 0
             job.source = cached.get("source")
@@ -586,7 +626,7 @@ def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=No
             log("job %s: served from cache" % key)
             return job, False
         job = Job(key, url, target, mode, limit, translator, duration_hint, asr,
-                  skip_library)
+                  skip_library, media_url, title_hint, cookies)
         JOBS[key] = job
     threading.Thread(target=run_job, args=(job,), daemon=True).start()
     return job, True
@@ -780,9 +820,13 @@ class Handler(BaseHTTPRequestHandler):
             duration_hint = body.get("duration") or None
             asr = body.get("asr") or "local"
             skip_library = bool(body.get("skip_library"))
+            media_url = (body.get("media_url") or "").strip() or None
+            title_hint = (body.get("title") or "").strip() or None
+            cookies = bool(body.get("cookies"))
             job, created = get_or_create(url, target, mode, limit, translator,
                                          float(duration_hint) if duration_hint else None,
-                                         asr, skip_library)
+                                         asr, skip_library, media_url, title_hint,
+                                         cookies)
             log("%s job %s for %s (%s)" % ("created" if created else "reused",
                                            job.id, url[:80], target))
             return self._send(200, dict(job.snapshot(), created=created))

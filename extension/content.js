@@ -350,6 +350,19 @@
 
   // ------------------------------------------------------------ job flow
 
+  function mediaCandidate() {
+    const v = S.video;
+    const src = v && (v.currentSrc || v.src || '');
+    if (src && /^https?:/i.test(src)) return src;
+    try {
+      const urls = performance.getEntriesByType('resource')
+        .map(function (e) { return e.name; })
+        .filter(function (u) { return /\.m3u8(\?|$)|\/manifest|\.mp4(\?|$)/i.test(u); });
+      if (urls.length) return urls[urls.length - 1];
+    } catch (e) { /* no resource timing */ }
+    return null;
+  }
+
   async function startJob() {
     if (S.busy) return;
     buildUI();
@@ -366,7 +379,10 @@
           url: url, target: cfg.target, mode: cfg.deep ? 'deep' : 'fast',
           translator: cfg.local ? 'local' : 'cloud',
           asr: cfg.cloudAsr ? 'cloud' : 'local',
-          duration: Math.round((S.video && S.video.duration) || 0)
+          duration: Math.round((S.video && S.video.duration) || 0),
+          media_url: mediaCandidate(),
+          title: (document.title || '').slice(0, 200),
+          cookies: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(location.hostname)
         }
       });
       S.job = job.id;

@@ -86,6 +86,20 @@ wall time. Greedy decoding, quantised models, flash attention and parallel chunk
 measured — none move it much. The only real win is not transcribing, which is why the
 library path exists.
 
+## Sites
+
+- **YouTube** — native and auto captions are read directly, no audio download, ~2 s.
+  Videos with no track fall through to the normal generate path.
+- **Plain MP4 / HLS players** — the extension sniffs the media URL from the page
+  (`video.currentSrc` plus resource-timing entries ending in `.m3u8` / `.mp4`) and the
+  engine pulls that stream directly with yt-dlp. Content scripts run in all frames, so
+  players inside a same-site iframe work too. This is the generic path most streaming
+  mirrors use.
+- **DRM** (Netflix, Prime Video, Disney+) — not supported. The stream is encrypted, so
+  there is nothing to transcribe.
+- Mirror sites rotate domains constantly; support is per-stream, not per-domain, which is
+  why it works without a site adapter.
+
 ## What it is not
 
 - Not a hosted service. There is no server; the engine runs on your Mac.

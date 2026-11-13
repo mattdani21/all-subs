@@ -134,9 +134,12 @@ def save_cache(key, data):
 
 # ---------------------------------------------------------------- probe
 
-def probe(url):
+def probe(url, cookies=False):
     """Metadata + subtitle inventory without downloading media."""
-    proc = run([YTDLP, "-J", "--no-warnings", "--no-playlist", url], timeout=300)
+    cmd = [YTDLP, "-J", "--no-warnings", "--no-playlist"]
+    if cookies:
+        cmd += ["--cookies-from-browser", "chrome"]
+    proc = run(cmd + [url], timeout=300)
     info = json.loads(proc.stdout)
     return {
         "title": info.get("title") or "Untitled",
@@ -173,11 +176,13 @@ def download_native_subs(url, lang, dest_base):
 
 # ---------------------------------------------------------------- media
 
-def download_audio_range(url, workdir, seconds=120, timeout=300):
+def download_audio_range(url, workdir, seconds=120, timeout=300, cookies=False):
     """Fetch only the opening seconds (yt-dlp sections), for first-caption latency."""
     out = os.path.join(workdir, "prefix.%(ext)s")
-    run([YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best",
-         "--download-sections", "*0-%d" % int(seconds), "-o", out, url],
+    cmd = [YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best"]
+    if cookies:
+        cmd += ["--cookies-from-browser", "chrome"]
+    run(cmd + ["--download-sections", "*0-%d" % int(seconds), "-o", out, url],
         timeout=timeout)
     for name in os.listdir(workdir):
         if name.startswith("prefix."):
@@ -185,7 +190,48 @@ def download_audio_range(url, workdir, seconds=120, timeout=300):
     raise RuntimeError("section download produced no file")
 
 
-def download_audio(url, workdir, key=None):
+def youtube_id(url):
+    m = re.search(r"(?:[?&]v=|youtu\.be/|/embed/|/shorts/|/live/)([A-Za-z0-9_-]{11})", url or "")
+    return m.group(1) if m else None
+
+
+def youtube_cues(url, target="en"):
+    """Native/auto captions for a YouTube video, without touching yt-dlp."""
+    vid = youtube_id(url)
+    if not vid:
+        return None
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return None
+    langs = [target] if target == "en" else [target, "en"]
+    tr = None
+    try:
+        api = YouTubeTranscriptApi()
+        tr = api.fetch(vid, languages=langs)
+        snips = list(tr)
+    except Exception:
+        try:
+            snips = YouTubeTranscriptApi.get_transcript(vid, languages=langs)
+        except Exception:
+            return None
+    cues = []
+    for item in snips:
+        if hasattr(item, "text"):
+            text, start, dur = item.text, item.start, item.duration
+        else:
+            text, start, dur = item.get("text", ""), item.get("start", 0), item.get("duration", 2)
+        text = re.sub(r"\s+", " ", text or "").strip()
+        if not text:
+            continue
+        cues.append({"start": round(start, 3), "end": round(start + (dur or 2.0), 3), "src": text})
+    if len(cues) < 5:
+        return None
+    lang = getattr(tr, "language_code", target) or target
+    return {"cues": cues, "lang": lang}
+
+
+def download_audio(url, workdir, key=None, cookies=False):
     media_cache = os.path.join(CACHE_DIR, "media")
     os.makedirs(media_cache, exist_ok=True)
     if key:
@@ -194,8 +240,10 @@ def download_audio(url, workdir, key=None):
             if os.path.exists(cached) and os.path.getsize(cached) > 100000:
                 return cached
     out = os.path.join(workdir, "audio.%(ext)s")
-    run([YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best",
-         "-o", out, url], timeout=3600)
+    cmd = [YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best"]
+    if cookies:
+        cmd += ["--cookies-from-browser", "chrome"]
+    run(cmd + ["-o", out, url], timeout=3600)
     for name in os.listdir(workdir):
         if name.startswith("audio."):
             path = os.path.join(workdir, name)
