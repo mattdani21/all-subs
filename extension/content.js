@@ -151,6 +151,7 @@
       '<button class="mini" data-el="minus">−0.1s</button>',
       '<button class="mini" data-el="plus">+0.1s</button>',
       '<button class="mini" data-el="reload">Re-sync</button>',
+      '<button class="mini" data-el="sync">Check sync</button>',
       '<button class="mini" data-el="settings">Settings</button>',
       '</div>',
       '<div class="meta" data-el="meta"></div>',
@@ -195,6 +196,25 @@
     });
     q('reload').addEventListener('click', function () {
       if (S.job) { S.cues = []; S.version = -1; refresh(true); }
+    });
+    q('sync').addEventListener('click', async function () {
+      if (!S.job) return;
+      setStatus('Listening to three samples…');
+      try {
+        const j = await api('/api/jobs/' + S.job + '/align', { method: 'POST' });
+        if (!j || j.error) return setStatus('Sync check: ' + ((j && j.error) || 'failed'));
+        if (j.offset === null || j.offset === undefined) {
+          return setStatus('Sync check: only ' + j.matches +
+            ' lines matched — can\'t verify (language mismatch?)');
+        }
+        const sign = j.offset > 0 ? '+' : '';
+        setStatus(j.applied
+          ? 'Moved subtitles ' + sign + j.offset + 's (' + j.matches + ' lines)'
+          : 'Sync looks right (' + sign + j.offset + 's, ' + j.matches + ' lines)');
+        if (j.applied) { S.version = -1; refresh(true); }
+      } catch (e) {
+        setStatus('Sync check failed: ' + e.message);
+      }
     });
 
     S.host = host; S.root = root; S.panel = panel; S.launch = launch;

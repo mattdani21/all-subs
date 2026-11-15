@@ -484,6 +484,67 @@ def transcribe_chunk(path, base, language="auto"):
     return segs, lang
 
 
+def _shingles(text):
+    text = re.sub(r"[\s\W_]+", "", text or "").lower()
+    if not text:
+        return set()
+    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+        return {text[i:i + 2] for i in range(len(text) - 1)}
+    return set(re.findall(r"[a-z0-9']+", text.lower()))
+
+
+def text_sim(a, b):
+    """Dice similarity on character bigrams (CJK) or word sets (latin)."""
+    A, B = _shingles(a), _shingles(b)
+    if not A or not B:
+        return 0.0
+    return 2.0 * len(A & B) / (len(A) + len(B))
+
+
+def align_by_content(path, cues, total, windows=(0.2, 0.5, 0.8), duration=30):
+    """Measure subtitle offset by matching recognised speech to cue text.
+
+    Only meaningful when the subtitle language matches the audio; cross-language
+    tracks produce almost no matches, and the caller should report that instead
+    of shifting anything.
+    """
+    diffs = []
+    langs = set()
+    tmpdir = os.path.dirname(path)
+    for i, frac in enumerate(windows):
+        start = max(0.0, total * frac - duration / 2.0)
+        if start + duration > total:
+            start = max(0.0, total - duration)
+        clip = os.path.join(tmpdir, "align_%d.wav" % i)
+        base = os.path.join(tmpdir, "align_%d" % i)
+        try:
+            run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", str(duration),
+                 "-i", path, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", clip],
+                timeout=300)
+            segs, lang = transcribe_chunk(clip, base)
+        except Exception:
+            continue
+        if lang:
+            langs.add(lang)
+        for seg in segs:
+            t = seg["start"] + start
+            best, score = None, 0.0
+            for c in cues:
+                if abs(c["start"] - t) > 8.0:
+                    continue
+                sc = text_sim(seg.get("src", ""), c.get("src", "") or c.get("dst", ""))
+                if sc > score:
+                    best, score = c, sc
+            if best is not None and score >= 0.5:
+                diffs.append(t - best["start"])
+    if len(diffs) < 6:
+        return None, len(diffs), None, sorted(langs)
+    diffs.sort()
+    med = diffs[len(diffs) // 2]
+    mad = sorted(abs(d - med) for d in diffs)[len(diffs) // 2]
+    return round(med, 2), len(diffs), round(mad, 2), sorted(langs)
+
+
 def _wav_frames(path, frame_ms=20):
     import array
     import wave

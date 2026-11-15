@@ -590,6 +590,19 @@ def _deep_pass(job):
     return elapsed
 
 
+def _job_audio(job):
+    """Local audio for a job: cached media first, else fetch audio-only."""
+    media = os.path.join(captions.CACHE_DIR, "media")
+    for ext in ("m4a", "mp4", "webm", "opus", "mkv", "mp3"):
+        path = os.path.join(media, job.id + "." + ext)
+        if os.path.exists(path) and os.path.getsize(path) > 100000:
+            return path
+    workdir = os.path.join(captions.JOBS_DIR, job.id + "_work")
+    os.makedirs(workdir, exist_ok=True)
+    return captions.download_audio(job.media_url or job.url, workdir, job.id,
+                                   cookies=job.cookies)
+
+
 def _cache(job):
     snap = job.snapshot()
     with job.lock:
@@ -847,6 +860,40 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=run, daemon=True).start()
             return self._send(200, job.snapshot())
+
+        m = re.match(r"^/api/jobs/([a-zA-Z0-9]+)/align$", parsed.path)
+        if m:
+            job = JOBS.get(m.group(1))
+            if not job or not job.cues:
+                return self._send(404, {"error": "no such job"})
+            t0 = time.time()
+            try:
+                audio = _job_audio(job)
+                total = job.duration or captions.duration_of(audio)
+                offset, matches, mad, langs = captions.align_by_content(
+                    audio, list(job.cues), total)
+            except Exception as exc:
+                log("job %s: sync check failed: %s" % (job.id, exc))
+                return self._send(500, {"error": str(exc)[:300]})
+            applied = False
+            if (offset is not None and abs(offset) >= 0.4 and matches >= 8
+                    and (mad or 0) <= 1.2):
+                with job.lock:
+                    for c in job.cues:
+                        c["start"] = max(0.0, c["start"] + offset)
+                        c["end"] = max(0.0, c["end"] + offset)
+                    job.version += 1
+                applied = True
+            job.set(align={"offset": offset, "matches": matches, "mad": mad,
+                           "langs": langs, "applied": applied})
+            job.to_disk()
+            _cache(job)
+            log("job %s: sync check offset=%s matches=%d mad=%s applied=%s (%.0fs)" % (
+                job.id, offset, matches, mad, applied, time.time() - t0))
+            return self._send(200, {"ok": True, "offset": offset, "matches": matches,
+                                    "mad": mad, "langs": langs, "applied": applied,
+                                    "version": job.version,
+                                    "secs": round(time.time() - t0, 1)})
 
         m = re.match(r"^/api/jobs/([a-zA-Z0-9]+)/cancel$", parsed.path)
         if m:
