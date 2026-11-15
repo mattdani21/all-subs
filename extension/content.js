@@ -428,7 +428,7 @@
           duration: Math.round((S.video && S.video.duration) || 0),
           media_url: mediaCandidate(),
           title: (document.title || '').slice(0, 200),
-          cookies: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(location.hostname)
+          cookies: false
         }
       });
       S.job = job.id;

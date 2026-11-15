@@ -824,7 +824,7 @@ class Handler(BaseHTTPRequestHandler):
             skip_library = bool(body.get("skip_library"))
             media_url = (body.get("media_url") or "").strip() or None
             title_hint = (body.get("title") or "").strip() or None
-            cookies = bool(body.get("cookies"))
+            cookies = bool(body.get("cookies")) and os.environ.get("ALLSUBS_YOUTUBE_COOKIES") == "1"
             job, created = get_or_create(url, target, mode, limit, translator,
                                          float(duration_hint) if duration_hint else None,
                                          asr, skip_library, media_url, title_hint,

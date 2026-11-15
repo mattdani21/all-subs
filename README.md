@@ -95,6 +95,9 @@ library path exists.
   engine pulls that stream directly with yt-dlp. Content scripts run in all frames, so
   players inside a same-site iframe work too. This is the generic path most streaming
   mirrors use.
+- **YouTube without captions** falls back to yt-dlp, which YouTube often refuses. Reading
+  Chrome's cookies (`--cookies-from-browser`) can fix that but triggers a macOS keychain
+  prompt, so it is opt-in: start the engine with `ALLSUBS_YOUTUBE_COOKIES=1`.
 - **DRM** (Netflix, Prime Video, Disney+) — not supported. The stream is encrypted, so
   there is nothing to transcribe.
 - Mirror sites rotate domains constantly; support is per-stream, not per-domain, which is
