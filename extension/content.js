@@ -265,7 +265,7 @@
   function adjustOffset(delta) {
     cfg.offset = Math.round(((cfg.offset || 0) + delta) * 10) / 10;
     if (S.overlay) S.overlay.setOffset(cfg.offset);
-    setStatus('Delay ' + (cfg.offset > 0 ? '+' : '') + cfg.offset.toFixed(1) + 's');
+    setStatus('Shift ' + (cfg.offset > 0 ? '+' : '') + cfg.offset.toFixed(1) + 's later');
     try {
       chrome.storage.local.get({ offsets: {} }, function (v) {
         const offsets = v.offsets || {};

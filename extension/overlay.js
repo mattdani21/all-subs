@@ -101,7 +101,7 @@
       layout();
       raf = requestAnimationFrame(render);
       if (!enabled || !cues.length || !video) return;
-      const t = video.currentTime + offset;
+      const t = video.currentTime - offset;
       const cue = findCue(cues, t);
       if (!cue) {
         if (visible) {
