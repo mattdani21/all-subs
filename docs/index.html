@@ -47,7 +47,10 @@
   .btn:hover { text-decoration: none; filter: brightness(1.06); }
   figure { margin: 40px 0 0; }
   figure img { width: 100%; border-radius: 10px; border: 1px solid var(--line); display: block; }
-  figcaption { font-size: 13px; color: var(--dim); margin-top: 10px; }
+  figcaption, .note { font-size: 13px; color: var(--dim); margin-top: 10px; }
+  .note { max-width: 760px; line-height: 1.65; }
+  .note code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+               padding: 1px 5px; font-family: var(--mono); font-size: 12px; }
   section { padding: 52px 0; border-bottom: 1px solid var(--line); }
   h2 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
        font-family: var(--mono); font-weight: 600; margin: 0 0 24px; }
@@ -74,10 +77,10 @@
     <div class="kicker">Chrome extension + local engine · MIT</div>
     <h1>Captions for the video nobody subtitled.</h1>
     <p class="sub">
-      All Subs looks for an existing subtitle track first — usually in seconds — and only
-      when nothing usable exists does it transcribe the audio locally with whisper.cpp and
-      translate it with an LLM. Four rungs, cheapest first, each with a gate deciding
-      whether its answer can be trusted.
+      All Subs walks a four-rung cascade, cheapest first: an existing subtitle track first
+      (usually under 10 seconds), then a cloud multimodal pass, then whisper.cpp on your
+      Mac, and finally a fully local model. A gate at each rung decides whether that
+      answer can be trusted before the next one is tried.
     </p>
     <div class="install">
       <code>git clone https://github.com/mattdani21/all-subs</code>
@@ -90,10 +93,17 @@
       <img src="hero.png" alt="All Subs overlay rendering subtitle cues over a paused film">
       <figcaption>A retrieved subtitle track over <em>Shadow</em> (2018) — the film that started this.</figcaption>
     </figure>
+
+    <p class="note">
+      The browser only draws the overlay. The extension sends the page URL, the
+      <code>&lt;video&gt;</code> source and the playhead to <code>127.0.0.1:8765</code>; the engine fetches
+      the audio with yt-dlp/ffmpeg, returns cues, and the overlay renders them against
+      <code>video.currentTime</code>.
+    </p>
   </header>
 
   <section>
-    <h2>The routing table</h2>
+    <h2>The routing table <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim);font-family:inherit">— measured on a 116-minute film, M3 / 8 GB</span></h2>
     <table>
       <thead>
         <tr><th>Rung</th><th>What happens</th><th>Measured</th></tr>
@@ -101,30 +111,32 @@
       <tbody>
         <tr>
           <td>1 · retrieve</td>
-          <td>Existing track via Wikidata → IMDb → subtitle library, gated on runtime coverage.</td>
+          <td>Existing track via Wikidata → IMDb → subtitle library, gated on runtime coverage and a
+              three-window sync check.</td>
           <td class="num">~8 s · 1,072 cues</td>
         </tr>
         <tr>
           <td>2 · cloud</td>
-          <td>An audio chunk and one multimodal call return timestamped, translated cues.</td>
-          <td class="num">4.9 s / 60 s · ~$0.30 per film</td>
+          <td>Each 60 s of audio goes to one multimodal call that returns timestamped, translated
+              cues; a failed call hands the rest to rung 3.</td>
+          <td class="num">4.9 s per 60 s · ~$0.30 per film</td>
         </tr>
         <tr>
           <td>3 · local ASR</td>
-          <td>whisper.cpp on the Mac; only cue text goes to the LLM for translation.</td>
-          <td class="num">11–17 min per 116 min</td>
+          <td>whisper.cpp on the Mac; only cue text goes to the LLM. Cues stream as chunks land.</td>
+          <td class="num">11–17 min per 116 min · ~$0.05 translation</td>
         </tr>
         <tr>
           <td>4 · fully local</td>
           <td>whisper.cpp plus a 4B model on the laptop. Nothing leaves the machine.</td>
-          <td class="num">needs 16 GB+</td>
+          <td class="num">unmeasured end-to-end · needs 16 GB+</td>
         </tr>
       </tbody>
     </table>
   </section>
 
   <section>
-    <h2>What people quote back</h2>
+    <h2>Why the gates exist</h2>
     <div class="cols">
       <ul>
         <li>The first retrieved track was a heist film's subtitles on a 116-minute movie — the last line landed 22 minutes after the credits. The coverage gate exists because of that.</li>
