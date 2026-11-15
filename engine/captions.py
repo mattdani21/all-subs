@@ -457,14 +457,20 @@ def filter_segments(segs, silences, lang=None):
         if silent / dur > 0.6 or (mid_silent and dur > 20):
             continue
         repeats = counts.get(key, 0)
-        if repeats >= 2 and dur >= 8:
+        # Repetition is only evidence of a whisper loop when the audio does not back
+        # the words up: a chorus repeating a line is real speech, a hallucination
+        # repeating one is usually low-confidence or sitting over silence.
+        weak = conf < 0.60 or (silent / dur) > 0.35
+        if repeats >= 6:
             continue
-        if repeats >= (4 if len(key) <= 3 else 3):
+        if weak and repeats >= 2 and dur >= 8:
+            continue
+        if weak and repeats >= (4 if len(key) <= 3 else 3):
             continue
         if any(a in key for a in (_norm(x) for x in ARTIFACTS)):
             if counts.get(key, 0) >= 2 or (lang and not lang.startswith("en")):
                 continue
-        if key == last:
+        if key == last and (len(key) <= 3 or silent / dur > 0.5):
             continue
         last = key
         out.append({"start": seg["start"], "end": seg["end"], "src": text})
