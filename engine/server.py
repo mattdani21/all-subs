@@ -241,20 +241,23 @@ def _run_job(job):
         text = captions.download_native_subs(job.url, code, os.path.join(workdir, "sub"))
         cues = captions.parse_vtt(text) if text.lstrip().startswith("WEBVTT") else captions.parse_srt(text)
         cues = captions.split_display([dict(c) for c in cues])
-        if code.lower().startswith(job.target.lower()):
-            for c in cues:
-                c["dst"] = c["src"]
+        if not cues:
+            log("job %s: native track %s parsed empty; falling through" % (job.id, code))
         else:
-            # found a usable track, but not in the viewer's language: translate it
-            translated = captions.translate_cues(cues, job.target, {"title": job.title})
-            for c in cues:
-                c["dst"] = translated.get(c["i"], c["src"])
-        job.add_cues(cues)
-        job.set(status="done", stage="Captions ready (%s)" % code, progress=1.0,
-                source="native", lang=code)
-        job.to_disk()
-        _cache(job)
-        return
+            if code.lower().startswith(job.target.lower()):
+                for c in cues:
+                    c["dst"] = c["src"]
+            else:
+                # found a usable track, but not in the viewer's language: translate it
+                translated = captions.translate_cues(cues, job.target, {"title": job.title})
+                for c in cues:
+                    c["dst"] = translated.get(c["i"], c["src"])
+            job.add_cues(cues)
+            job.set(status="done", stage="Captions ready (%s)" % code, progress=1.0,
+                    source="native", lang=code)
+            job.to_disk()
+            _cache(job)
+            return
 
     # 2. search public subtitle libraries before doing any ASR
     if (job.duration_hint and job.duration_hint > 300 and not job.skip_library
@@ -268,7 +271,7 @@ def _run_job(job):
         if found and found.get("rejected"):
             log("job %s: provider rejected track %s (%s)" % (
                 job.id, found.get("imdb"), found.get("note")))
-        elif found:
+        elif found and found.get("cues"):
             cues = found["cues"]
             if job.target and (found.get("lang") or "").startswith(job.target):
                 for c in cues:

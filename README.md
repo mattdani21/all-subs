@@ -41,7 +41,9 @@ Chrome extension  ──►  local engine (127.0.0.1:8765)
 
 ![pipeline](docs/allsubs-pipeline.png)
 
-Everything heavy runs on your machine; only cue text goes to the translation API. Jobs are
+Everything heavy runs on your machine. On the local path only cue text goes to the
+translation API; the cloud rung uploads audio, which is why it is a choice rather than a
+default. Jobs are
 cached by URL + language, so a second viewing is instant.
 
 ## Quick start (macOS)

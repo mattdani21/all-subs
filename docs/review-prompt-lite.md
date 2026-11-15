@@ -1,7 +1,6 @@
 # All Subs — production-readiness and direction review
 
-You are reviewing a real, working open-source project. Read the code at
-https://github.com/mattdani21/all-subs (public, MIT) before answering. Be concrete and
+You are reviewing a real, working open-source project. The full relevant code is included below; do not use any tools or fetch anything — answer only from this text. Be concrete and
 critical; praise is not useful.
 
 ## What it is
