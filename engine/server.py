@@ -19,7 +19,7 @@ import providers
 
 PORT = int(os.environ.get("ALLSUBS_PORT", "8765"))
 MAX_WORKERS = 2
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 JOBS = {}
 PREFETCH = {}

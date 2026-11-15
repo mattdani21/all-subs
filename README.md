@@ -117,15 +117,17 @@ library path exists.
 - `yt-dlp` is refused by YouTube's bot check; bilibili and direct video hosts work.
 - Overlay can't attach to a bare `<video>` in fullscreen — only container fullscreen.
 - Library subtitles occasionally come from a different release; the duration gate catches
-  the obvious mismatches, not every offset. Use `−0.3s` / `+0.3s`.
+  the obvious mismatches, not every offset. Use `Check sync` for same-language tracks, or
+  the ±0.1 s nudge otherwise.
 - Alpha quality: unsigned, no auto-update.
 
 ## Controls
 
 - `Alt+Shift+A` — open/close the panel
 - Bilingual — original line above the translation
-- `−0.3s` / `+0.3s` — timing nudge
+- `−0.1s` / `+0.1s` — timing nudge; the correction is saved per site
 - Re-sync — refetch cues (after the deep pass rewrites them)
+- Check sync — re-listens to three 30-second samples and shifts the track if it is out
 
 ## API (engine)
 
@@ -137,6 +139,7 @@ library path exists.
 | GET | `/api/jobs/{id}` | status, stage, progress |
 | GET | `/api/jobs/{id}/cues?from=N` | `{i,s,e,x,t}` |
 | POST | `/api/jobs/{id}/refine` | re-run the whole-film pass only |
+| POST | `/api/jobs/{id}/align` | content-matched timing check; shifts cues if genuinely out |
 | GET | `/api/jobs/{id}.vtt` | WebVTT export |
 
 ## Offline mode (experimental)

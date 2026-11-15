@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>All Subs — AI captions for any video</title>
+<meta name="description" content="A Chrome extension + local engine that finds existing subtitles first, and only transcribes and translates when nothing usable exists.">
+<style>
+  :root {
+    --bg: #0b0c0f;
+    --panel: #12141a;
+    --line: #232733;
+    --text: #e7e9ee;
+    --dim: #9aa1b1;
+    --accent: #ffb454;
+    --ok: #7ee787;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 64px 0 40px; border-bottom: 1px solid var(--line); }
+  .kicker {
+    font: 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 18px;
+  }
+  h1 { font-size: 44px; line-height: 1.1; margin: 0 0 18px; letter-spacing: -.02em; }
+  .sub { font-size: 19px; color: var(--dim); max-width: 660px; margin: 0 0 28px; }
+  .install {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    font: 13px/1.5 var(--mono); color: var(--dim);
+  }
+  .install code {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; color: var(--text);
+  }
+  .btn {
+    display: inline-block; background: var(--accent); color: #14100a; font-weight: 600;
+    padding: 11px 18px; border-radius: 6px; margin-top: 22px;
+  }
+  .btn:hover { text-decoration: none; filter: brightness(1.06); }
+  figure { margin: 40px 0 0; }
+  figure img { width: 100%; border-radius: 10px; border: 1px solid var(--line); display: block; }
+  figcaption { font-size: 13px; color: var(--dim); margin-top: 10px; }
+  section { padding: 52px 0; border-bottom: 1px solid var(--line); }
+  h2 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
+       font-family: var(--mono); font-weight: 600; margin: 0 0 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 14px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  td:first-child { font-family: var(--mono); color: var(--accent); white-space: nowrap; }
+  .num { font-family: var(--mono); color: var(--ok); white-space: nowrap; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  ul { margin: 0; padding-left: 20px; color: var(--dim); }
+  li { margin-bottom: 10px; }
+  footer { padding: 40px 0 72px; color: var(--dim); font-size: 14px; }
+  footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  @media (max-width: 720px) {
+    h1 { font-size: 32px; }
+    .cols { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">Chrome extension + local engine · MIT</div>
+    <h1>Captions for the video nobody subtitled.</h1>
+    <p class="sub">
+      All Subs looks for an existing subtitle track first — usually in seconds — and only
+      when nothing usable exists does it transcribe the audio locally with whisper.cpp and
+      translate it with an LLM. Four rungs, cheapest first, each with a gate deciding
+      whether its answer can be trusted.
+    </p>
+    <div class="install">
+      <code>git clone https://github.com/mattdani21/all-subs</code>
+      <code>cd all-subs &amp;&amp; ./allsubs setup</code>
+      <code>./allsubs start</code>
+    </div>
+    <a class="btn" href="https://github.com/mattdani21/all-subs">Get it on GitHub</a>
+
+    <figure>
+      <img src="hero.png" alt="All Subs overlay rendering subtitle cues over a paused film">
+      <figcaption>A retrieved subtitle track over <em>Shadow</em> (2018) — the film that started this.</figcaption>
+    </figure>
+  </header>
+
+  <section>
+    <h2>The routing table</h2>
+    <table>
+      <thead>
+        <tr><th>Rung</th><th>What happens</th><th>Measured</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1 · retrieve</td>
+          <td>Existing track via Wikidata → IMDb → subtitle library, gated on runtime coverage.</td>
+          <td class="num">~8 s · 1,072 cues</td>
+        </tr>
+        <tr>
+          <td>2 · cloud</td>
+          <td>An audio chunk and one multimodal call return timestamped, translated cues.</td>
+          <td class="num">4.9 s / 60 s · ~$0.30 per film</td>
+        </tr>
+        <tr>
+          <td>3 · local ASR</td>
+          <td>whisper.cpp on the Mac; only cue text goes to the LLM for translation.</td>
+          <td class="num">11–17 min per 116 min</td>
+        </tr>
+        <tr>
+          <td>4 · fully local</td>
+          <td>whisper.cpp plus a 4B model on the laptop. Nothing leaves the machine.</td>
+          <td class="num">needs 16 GB+</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>What people quote back</h2>
+    <div class="cols">
+      <ul>
+        <li>The first retrieved track was a heist film's subtitles on a 116-minute movie — the last line landed 22 minutes after the credits. The coverage gate exists because of that.</li>
+        <li>A cloud call returning 402 mid-job falls through to local whisper instead of failing the job.</li>
+      </ul>
+      <ul>
+        <li>Check sync re-listens to three 30-second samples and shifts a track only when the recognised lines say it is genuinely out.</li>
+        <li>Offsets persist per site, so a correction is made once.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>What it is not</h2>
+    <div class="cols">
+      <ul>
+        <li>Not real-time. A film is processed once, then served from cache.</li>
+        <li>Not DRM. Netflix and Prime are out of scope.</li>
+        <li>Not "any site" — plain MP4/HLS and sites yt-dlp supports.</li>
+      </ul>
+      <ul>
+        <li>Not a hosted service. The engine runs on your machine at <code>127.0.0.1:8765</code>.</li>
+        <li>Not signed, not notarised, no auto-update. Alpha.</li>
+        <li>macOS first; Linux should work, Windows untested.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    <div class="row">
+      <span>MIT · built by <a href="https://github.com/mattdani21">Matt</a></span>
+      <span><a href="https://github.com/mattdani21/all-subs">Source</a> · <a href="https://github.com/mattdani21/all-subs#readme">Docs</a></span>
+    </div>
+  </footer>
+
+</div>
+</body>
+</html>
