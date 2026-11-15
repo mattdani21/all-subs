@@ -266,6 +266,25 @@
     cfg.offset = Math.round(((cfg.offset || 0) + delta) * 10) / 10;
     if (S.overlay) S.overlay.setOffset(cfg.offset);
     setStatus('Delay ' + (cfg.offset > 0 ? '+' : '') + cfg.offset.toFixed(1) + 's');
+    try {
+      chrome.storage.local.get({ offsets: {} }, function (v) {
+        const offsets = v.offsets || {};
+        offsets[location.hostname] = cfg.offset;
+        chrome.storage.local.set({ offsets: offsets });
+      });
+    } catch (e) { /* noop */ }
+  }
+
+  function loadSiteOffset() {
+    try {
+      chrome.storage.local.get({ offsets: {} }, function (v) {
+        const saved = (v.offsets || {})[location.hostname];
+        if (typeof saved === 'number' && saved !== 0) {
+          cfg.offset = saved;
+          if (S.overlay) S.overlay.setOffset(saved);
+        }
+      });
+    } catch (e) { /* noop */ }
   }
 
   function setStatus(text, isErr) {
@@ -501,6 +520,7 @@
   // ------------------------------------------------------------ boot
 
   function boot() {
+    loadSiteOffset();
     const v = pickVideo();
     if (v) {
       attachVideo(v);
