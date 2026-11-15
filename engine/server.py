@@ -94,6 +94,7 @@ class Job(object):
         self.pass2 = False
         self.synopsis = ""
         self.glossary = {}
+        self.track = {}
         self.error = None
         self.created = now()
         self.updated = now()
@@ -126,7 +127,7 @@ class Job(object):
                 "synopsis": self.synopsis, "mode": self.mode,
                 "translator": self.translator,
                 "duration_hint": self.duration_hint,
-                "asr": self.asr,
+                "asr": self.asr, "track": self.track,
             }
 
     def cue_payload(self, start=0, limit=400):
@@ -190,8 +191,9 @@ def _run_job(job):
                     c["dst"] = translated.get(c["i"], c["src"])
             job.add_cues(cues)
             job.set(status="done", stage="Captions ready (YouTube)", progress=1.0,
-                    source="youtube", lang=yt.get("lang"),
-                    duration=job.duration_hint or 0)
+                    source="youtube", lang=yt.get("lang"), duration=job.duration_hint or 0,
+                    track={"kind": "youtube", "lang": yt.get("lang"),
+                           "note": "YouTube caption track"})
             job.to_disk()
             _cache(job)
             log("job %s: youtube captions, %d cues" % (job.id, len(cues)))
@@ -207,7 +209,11 @@ def _run_job(job):
             job.add_cues(cues)
             job.set(status="done", stage="Captions ready (library)", progress=1.0,
                     source="wyzie", lang=pre["found"].get("lang"),
-                    duration=pre.get("duration") or 0)
+                    duration=pre.get("duration") or 0,
+                    track={"kind": "library", "provider": "Wyzie",
+                           "lang": pre["found"].get("lang"),
+                           "imdb": pre["found"].get("imdb"),
+                           "note": pre["found"].get("note") or ""})
             job.to_disk()
             _cache(job)
             log("job %s: prefetched library track (%d cues)" % (job.id, len(cues)))
@@ -254,7 +260,9 @@ def _run_job(job):
                     c["dst"] = translated.get(c["i"], c["src"])
             job.add_cues(cues)
             job.set(status="done", stage="Captions ready (%s)" % code, progress=1.0,
-                    source="native", lang=code)
+                    source="native", lang=code,
+                    track={"kind": "native", "lang": code,
+                           "note": "the site's own subtitle track"})
             job.to_disk()
             _cache(job)
             return
@@ -283,7 +291,10 @@ def _run_job(job):
                     c["dst"] = translated.get(c["i"], c["src"])
             job.add_cues(cues)
             job.set(status="done", stage="Captions ready (library)", progress=1.0,
-                    source="wyzie", lang=found.get("lang"), duration=job.duration_hint)
+                    source="wyzie", lang=found.get("lang"), duration=job.duration_hint,
+                    track={"kind": "library", "provider": "Wyzie",
+                           "lang": found.get("lang"), "imdb": found.get("imdb"),
+                           "note": found.get("note") or ""})
             job.to_disk()
             _cache(job)
             log("job %s: used library track %s (%s)" % (
@@ -329,7 +340,9 @@ def _run_job(job):
         lang = code
         chunks = captions.split_wav(prefix, workdir, limit=job.limit, schedule=[30, 90])
         job.set(lang=lang, duration=total, status="asr",
-                stage="Transcribing the opening", progress=0.1, source="asr")
+                stage="Transcribing the opening", progress=0.1, source="asr",
+                track={"kind": "asr", "lang": lang,
+                       "note": "whisper large-v3-turbo on this Mac"})
         log("job %s: opening ready (%ss), language %s" % (
             job.id, chunks[0][2] if chunks else 0, lang))
     else:
@@ -345,14 +358,18 @@ def _run_job(job):
         chunks = captions.split_wav(audio, workdir, limit=job.limit,
                                     schedule=[30, 90, 180, 300])
         job.set(lang=lang, duration=total, status="asr",
-                stage="Transcribing 0/%d" % len(chunks), progress=0.1, source="asr")
+                stage="Transcribing 0/%d" % len(chunks), progress=0.1, source="asr",
+                track={"kind": "asr", "lang": lang,
+                       "note": "whisper large-v3-turbo on this Mac"})
         log("job %s: %d chunks, %.0fs audio" % (job.id, len(chunks), total))
 
     if job.asr == "cloud" and cloud_asr.available():
         try:
             _cloud_pass(job, chunks, lang)
             job.set(status="done", stage="Captions ready (cloud)", progress=1.0,
-                    source="cloud")
+                    source="cloud",
+                    track={"kind": "cloud", "lang": lang,
+                           "note": "multimodal model, audio sent per chunk"})
             job.to_disk()
             _cache(job)
             log("job %s: done (cloud), %d cues" % (job.id, len(job.cues)))
@@ -616,8 +633,11 @@ def _cache(job):
 
 def get_or_create(url, target, mode, limit, translator="cloud", duration_hint=None,
                   asr="local", skip_library=False, media_url=None, title_hint=None,
-                  cookies=False):
+                  cookies=False, force=False):
     suffix = "" if translator == "cloud" else "|" + translator
+    if force:
+        suffix += "|ai"
+        skip_library = True
     if asr != "local":
         suffix += "|" + asr
     key = captions.url_key(url, target + suffix)
@@ -841,10 +861,11 @@ class Handler(BaseHTTPRequestHandler):
             media_url = (body.get("media_url") or "").strip() or None
             title_hint = (body.get("title") or "").strip() or None
             cookies = bool(body.get("cookies")) and os.environ.get("ALLSUBS_YOUTUBE_COOKIES") == "1"
+            force = bool(body.get("force"))
             job, created = get_or_create(url, target, mode, limit, translator,
                                          float(duration_hint) if duration_hint else None,
                                          asr, skip_library, media_url, title_hint,
-                                         cookies)
+                                         cookies, force)
             log("%s job %s for %s (%s)" % ("created" if created else "reused",
                                            job.id, url[:80], target))
             return self._send(200, dict(job.snapshot(), created=created))

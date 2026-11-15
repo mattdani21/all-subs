@@ -448,7 +448,8 @@
           duration: Math.round((S.video && S.video.duration) || 0),
           media_url: mediaCandidate(),
           title: (document.title || '').slice(0, 200),
-          cookies: false
+          cookies: false,
+          force: !!cfg.forceAi
         }
       });
       S.job = job.id;
@@ -491,12 +492,34 @@
       setProgress(d.progress || 0);
       const meta = S.root.querySelector('[data-el="meta"]');
       if (meta) {
+        const track = d.track || null;
+        const prov = track ? ({
+          library: 'subs: library' + (track.provider ? ' · ' + track.provider : ''),
+          native: 'subs: this site\'s own track',
+          youtube: 'subs: YouTube captions',
+          asr: 'subs: AI-generated'
+        }[track.kind] || '') : '';
         meta.textContent = [
           d.title || '',
-          d.lang ? 'heard: ' + d.lang : '',
+          prov,
+          track && track.lang ? 'lang ' + track.lang : (d.lang ? 'heard: ' + d.lang : ''),
+          track && track.note ? track.note : '',
           d.count ? d.count + ' cues' : '',
           d.pass2 ? 'whole-film pass done' : ''
         ].filter(Boolean).join(' · ');
+        if (track && track.kind !== 'asr') {
+          const b = document.createElement('button');
+          b.className = 'mini';
+          b.textContent = 'Use AI instead';
+          b.style.marginLeft = '8px';
+          b.addEventListener('click', function () {
+            cfg.forceAi = true;
+            saveCfg();
+            S.job = null; S.cues = []; S.version = -1;
+            startJob();
+          });
+          meta.appendChild(b);
+        }
         if (d.count && S.job) {
           const a = document.createElement('a');
           a.href = cfg.backend + '/api/jobs/' + S.job + '.vtt';

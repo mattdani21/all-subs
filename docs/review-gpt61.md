@@ -1,210 +1,264 @@
-Verdict
+[D] Yes—polish it into a narrowly supported, reproducible macOS caption tool, not a universal caption platform. For reputation, the strongest release is one a stranger can install, understand and recover when it fails. The immediate blockers are not another ASR speedup or a larger panel: I found job-lifecycle failures, inconsistent privacy enforcement and timing bugs beneath the advertised gates. Do not make a broad adoption push before fixing those.
 
-[D] Worth polishing into a reproducible, Mac-first subtitle-recovery tool—not into a universal captioning platform. The strongest demonstration would be a stranger installing it, recovering useful captions, understanding which route ran, and correcting a bad result. [E] The supplied measurements establish feasibility on one film and one machine; they do not establish general reliability. [D] For reputation, a narrow claim supported by reproducible evidence is worth more than additional inference modes.
+Review basis
 
-[E] This review has the README and selected implementation excerpts, not the complete request handler, setup script, extension manifest, provider gates, or job lifecycle. [D] Where those details matter, the findings below are verification requirements rather than claims that safeguards are absent.
+[E] Reviewed public commit 9a11ee94346633a1e6e3f9ba325510d3d4716378. Eight unit tests passed. I also ran isolated HTTP, job-runner, browser-message and timing probes against the actual source. No repository files were changed.
 
-1. Top five changes, ranked by expected quality gained per hour
+[E] These were focused reproductions, not a clean-machine installation or another full-film validation. The film timings in the README remain author-reported measurements, not independently reproduced benchmarks. The browser E2E script is a live-site screenshot/inspection script with no assertions, rather than a regression suite that establishes successful captioning. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/README.md))
 
-[A] Effort estimates below assume the current implementation is reasonably factored. They are estimates, not measured implementation times. [D] The security item is a public-release prerequisite regardless of its ranking.
+Evidence labels: [E] inspected source or reproduced behavior; [D] conclusion or recommendation; [A] unverified assumption or effort estimate. All effort estimates below assume the author implements the change and exclude cross-platform support.
 
-1) Make route selection and success conditions truthful
+1. Top five changes, ranked by practical return per hour
 
-[A] Effort: roughly one day.
+1) Make retrieval-only use a legitimate successful installation
 
-[E] Both shown subtitle branches parse or obtain cues, publish them, and mark the job done without a visible post-parse usability check. [D] An empty or unusable native track could therefore prevent the fallback that is the project’s central promise.
+[A] Effort: roughly one day for the CLI/settings repair; another day for a small onboarding screen.
 
-[E] The shown cloud path runs only when job.asr == "cloud" and cloud_asr.available(); it is not visibly an automatic cloud-before-local ladder. [E] The README describes automatic fallthrough through four rungs. [D] Either implement that policy explicitly or describe the actual selectable modes.
+[E] Setup currently downloads the speech model and treats a missing DeepSeek key as failure. Doctor does not recognise keys saved through the extension’s config mechanism. Settings offers a backend URL, but the background proxy always uses port 8765. These are inconsistencies in the supported path, not merely terminal friction. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/allsubs))
 
-Build:
+[D] Build a capability-based setup flow:
 
-- [D] A shared candidate validator: nonempty text, finite timestamps, positive durations, valid ordering, and a recorded language/provenance result. Keep runtime coverage separate from synchronization confidence.
-- [D] Explicit route outcomes: accepted, rejected, unavailable, failed. Preserve the reason when moving to another route.
-- [D] Treat “no usable cues” as a failed candidate, not a completed job.
-- [D] Make cloud use an explicit, consented policy choice; do not interpret a missing subtitle track as permission to spend API credit.
-- [D] Return a small route trace to the panel: “native empty → library rejected → local ASR running.”
+    Existing subtitles: available / provider key missing.
+    Local transcription: binary missing / model missing / ready.
+    Translation: unconfigured / configured / last request failed.
+    Cloud audio: disabled / explicitly authorised / configured.
 
-[D] Unlocks: failures become explainable, and the README’s central routing claim becomes testable. Acceptance: an empty native track reaches the next permitted route; no usable final cues never produces “Captions ready.”
+[D] Do not require a speech model or translation key to demonstrate retrieval. Download the model only when the user enables local transcription. Use a project venv rather than modifying system Python packages. Give CLI and UI one setup-state implementation.
 
-2) Remove the model download from the default installation
+[E] Model downloads currently write directly to their final filenames; subsequent setup accepts any nonempty file. An interrupted download can therefore be mistaken for an installed model. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/allsubs))
 
-[A] Effort: one to two days for a retrieval-first setup path and an extension-guided connection check—not a packaged application.
+[D] Download to .part, verify a pinned checksum, then rename atomically. The acceptance test is an interrupted installation followed by a successful rerun—not just a successful first download.
 
-[E] The quick start installs the speech stack and a large speech model before the user has demonstrated any need for ASR. [D] This makes the most expensive fallback a prerequisite for the cheapest successful route.
+[D] Unlock: the lowest-cost caption path also becomes the lowest-cost installation path.
 
-Build:
+2) Make every job finish, fail or cancel—never silently hang
 
-- [D] A minimal engine installation for retrieval and native-track handling; install ASR dependencies and the model only when that route is requested.
-- [D] A capability endpoint that reports engine version, available routes, missing dependencies, and actionable errors without returning secrets.
-- [D] An extension welcome screen that checks the engine, explains the permitted routes, and opens the relevant setup instructions.
-- [D] A model-install operation with visible progress, integrity verification, cancellation, and a safe retry.
-- [D] A rights-cleared local sample page for the first success, independent of a streaming site or paid provider.
+[A] Effort: one to two days including regression tests.
 
-[D] Unlocks: a stranger can test the extension–engine connection and overlay without first committing to a large model download. [A] This is likely a better initial return than building a notarised application around an unproven first-run flow.
+[E] A translation-worker exception leaves queue items unfinished while the runner waits indefinitely. I reproduced this using the real missing-key path: the job remained active with no reported error. Cancellation also failed a queued-job probe. Cache reuse ignored changed mode and limit. Relevant locations: server.py, translate_worker(), run_job() and get_or_create(). ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/server.py))
 
-3) Turn the local-player harness into a release gate
+[D] Build explicit terminal-state handling:
 
-[A] Effort: one to two days for a bounded initial suite; broader real-film validation remains ongoing.
+    Catch worker exceptions and propagate them to the job.
+    Call task_done() in finally.
+    Bound queue shutdown and subprocess waits.
+    Check a cancellation event before work and before publishing results.
+    Kill owned subprocesses when cancellation requires it.
+    Separate cache identity from the identity of a running attempt.
 
-[E] A Playwright local-player harness already exists, but there is no automated end-to-end suite. [D] Extend that asset rather than starting with a large compatibility campaign.
+[D] Include output-affecting options and a pipeline/schema version in cache identity. A short diagnostic run must not become the cached answer for a full-film request.
 
-Build a small, rights-cleared fixture set covering:
+[E] Settings also reports success after an HTTP error because it does not check res.ok. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/extension/options.js))
 
-- [D] A valid track, an empty track, and a malformed track.
-- [D] A wrong-release track with plausible total duration.
-- [D] Speech, music, silence, and sparse dialogue.
-- [D] Engine unavailable, provider failure, and interrupted processing.
-- [D] Seeking, reloading, switching videos, and duplicate requests.
+[D] Preserve errors, retain unsaved inputs and provide a retry action. Test missing credentials, malformed translation JSON, timeout, cancellation and engine restart without using paid APIs.
 
-[D] Stub provider responses for deterministic routing tests, but label those tests as integration tests with stubs—not proof of live transcription quality. Add a separate real-engine smoke test and a small human-reviewed quality set.
+[D] Unlock: strangers encounter understandable failure instead of an apparently broken product.
 
-[D] Publish a compatibility table with exact tested machine, browser, source type, language pair, route, and result. Leave untested cells unclaimed.
+3) Establish a real trust boundary before distributing it further
 
-[D] Unlocks: changes stop silently breaking the working demonstration, and reviewers can distinguish tested behavior from aspiration. Acceptance: one command runs the deterministic suite and produces an actual pass/fail result.
+[A] Effort: one to two days for the immediate boundary and policy fixes; broader security hardening is additional work.
 
-4) Establish the local engine’s trust boundary
+[E] The engine accepts unauthenticated requests with wildcard CORS. An isolated request using a foreign Origin, foreign Host and text/plain successfully changed dummy configuration. Direct website-to-loopback browser reachability was not established. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/server.py))
 
-[A] Effort: roughly one to two days if the safeguards are not already present; their current state is unclear from the excerpts.
+[E] A separate browser probe found a more concrete extension-side route: page JavaScript could access the open shadow-root controls and synthetically select Cloud and start captioning. The actual content script emitted a cloud-job message; the runtime/backend was mocked, so no audio upload or charge occurred. The relevant controls have no trusted-event check. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/extension/content.js))
 
-[E] The engine accepts work through localhost HTTP, and content scripts can request API calls through the extension background proxy. [D] Binding to 127.0.0.1 limits network exposure; it does not by itself establish that a request is authorised.
+[D] Build:
 
-Build or verify:
+    An installation-scoped pairing token held by extension-owned code.
+    Host/Origin validation, strict JSON handling and request-size limits.
+    A constrained API-operation allowlist in the background proxy.
+    Cloud authorisation in an extension-owned popup/options page.
+    Trusted-event checks on privileged in-page actions.
+    Escaping of remote metadata in the engine dashboard.
 
-- [D] Pair the extension with the engine using a generated credential stored in extension-owned configuration, not page-accessible state.
-- [D] Restrict proxy routes, HTTP methods, request sizes, and accepted URL schemes. Authenticate every sensitive endpoint; CORS alone is not authorisation.
-- [D] Validate redirects and destination addresses for downloader requests. Document any deliberate exception for local media.
-- [D] Bound queued jobs, active inference work, subprocess duration, and disk retention.
-- [D] Exclude keys, cookies, signed media URLs, and transcript contents from default diagnostics.
-- [D] Rotate the disclosed development key if it has not already been rotated; tightening file permissions does not revoke an exposed credential.
+[D] A closed shadow root is defence in depth, not authorisation. Likewise, an authenticated engine does not protect against an authorised extension being tricked into issuing a request.
 
-[D] Unlocks: a defensible answer to “What can an untrusted webpage make this local process do?” Acceptance: unauthorised requests cannot start work, spend credit, read configuration, or modify settings.
+[E] Offline-selected native-caption translation still reaches the default cloud translator. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/server.py))
 
-5) Add recovery controls before more automation
+[D] Centralise translation routing and enforce a “no external inference” policy across every branch. If strict offline means no network at all, separately disable metadata/provider prefetching. Test that policy by making forbidden network calls fail the test.
 
-[A] Effort: one to two days for the initial controls.
+[D] Unlock: you can make privacy statements without depending on which branch happened to execute.
 
-[E] Library tracks can come from other releases, and “Check sync” is limited to matching recognisable same-language text. [D] Users need an escape hatch when the automated decision is wrong.
+4) Fix media identity and temporal correctness before improving translation
 
-Build:
+[A] Effort: one to two days for the defects below and focused tests.
 
-- [D] “Wrong film/release,” “Try another source,” and “Generate instead.”
-- [D] Import a local SRT/VTT file.
-- [D] A reversible manual subtitle offset with reset.
-- [D] Cancel and retry from an explicit route, without allowing a rejected cached result to win again.
-- [D] Show source, track language, translation mode, and the actual rejection/error reason.
+[E] Replacing the video element preserves the previous job and cues. The overlay’s empty-cue path can leave the previous caption visible. These create wrong-video and stale-caption failures independently of model quality. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/extension/content.js))
 
-[D] Unlocks: a recoverable bad match stops looking like a broken product. Cross-tab polish is less valuable than recovering the captions in the tab already open.
+[D] Introduce a media-generation identifier. On navigation or source replacement, reset overlay/job state and reject asynchronous responses from the old generation. Test both replacement elements and changing currentSrc on the same element.
 
-2. Distribution: choose a sequence, not one permanent package
+[E] In the local pipeline, chunk offsets are added before snap_to_onsets() inspects chunk-local audio. My synthetic probe moved a relative cue correctly but did not apply the equivalent correction after its absolute offset. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/server.py))
 
-[D] Recommended sequence: bounded developer preview now; retrieval-first installation next; signed/notarised Mac companion plus a separately distributed extension after clean-machine validation. Consider Chrome Web Store distribution for the extension once its permissions and behavior are stable. Do not build a hosted service for this goal.
+[D] Snap in chunk coordinates, then add the offset. Make that invariant explicit in function names and tests.
+
+[E] The Latin-text matcher removes whitespace before extracting words. Consequently, ordinary sentences become single concatenated tokens. My probe returned zero similarity for “hello there my friend” versus the same sentence with “today” appended. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/captions.py))
+
+[D] Tokenise before destructive normalisation. Require distinct matches across multiple sample windows before applying a shift. Scope manual offsets to a video/track, not a hostname.
+
+[D] Unlock: improvements to the caption model are no longer obscured by deterministic playback bugs.
+
+5) Ship a reproducible demonstration and a small assertion-based suite
+
+[A] Effort: one to two days for the first useful version; independent installer testing adds coordination time.
+
+[E] The existing E2E script hardcodes an author-specific checkout/browser path, opens one bilibili URL, prints state and captures screenshots. Missing overlay output is not an assertion failure. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/test/e2e.py))
+
+[D] Build two visibly different demonstrations:
+
+    Retrieval: a legally redistributable clip and known subtitle track.
+    Generation: a clip with no track, exercising actual ASR and translation.
+
+[D] Use temporary HOME, profile, cache and engine ports. Assert caption text, timing, source badge, terminal job state, navigation reset, seek-back behavior and error recovery. Mock providers in routine CI; keep opt-in real-provider smoke tests separate.
+
+[D] Add a release checklist with independent clean installations and a published compatibility matrix. Record hardware, versions, cold/warm cache state and failures. A mocked green test proves integration logic; it must never be presented as evidence of model quality.
+
+[D] Unlock: the launch becomes “here is a result you can reproduce,” rather than “here is my screenshot.”
+
+[D] This ranking is return-on-effort, not permission to defer security: recommendations 2 and 3 are public-release gates.
+
+2. Distribution: choose a staged combination, not one exclusive option
+
+[D] Best destination: Chrome Web Store extension plus a signed/notarised Mac companion, with a thin native-messaging bridge. Best next step: repair the source release and validate installation before building that packaging.
 
 Unpacked extension + local engine
 
-[E] This is the current distribution. [D] Keep it as the contributor/debugging path and label it honestly as a developer preview.
+[A] Packaging effort after the fixes: hours to a day for a versioned source release and checksums.
 
-[A] Effort is lowest; adoption friction remains highest. [D] Its credibility comes from accurate instructions and reproducible results, not from pretending it is consumer-ready.
+[D] Keep it for contributors and the initial technical audience. It gives the best near-term credibility per hour, but should remain explicitly a developer installation—not the promised stranger-friendly experience.
 
-Signed/notarised Mac companion
+Signed/notarised Mac app
 
-[D] This is the best fit for a deliberately Mac-first, local-processing product: engine lifecycle, dependency management, model installation, logs, and updates can have one owner.
+[A] Effort: roughly one to two weeks for a dependable first package, including a bundled runtime, dependency handling, model download/resume, lifecycle and uninstall—not merely wrapping the shell script.
 
-[A] Expect several days to multiple weeks for a dependable package, depending on dependency bundling and release experience. [D] Ongoing risks include updater maintenance, binary provenance, model redistribution terms, and supporting the packaged dependencies.
+[D] This is the highest-value next distribution investment if nontechnical Mac users actually want the tool. The app should start/stop the engine, show its status and manage models. Do not build an elaborate desktop transcript editor.
 
-[D] It does not distribute the Chrome extension by itself. Avoid turning the entire product into a mandatory large download; keep models optional.
+Apple lists Developer Program membership at US$99 per year, with regional pricing variations. Notarisation and Developer ID signing are separate distribution work, not a substitute for application testing. ([developer.apple.com](https://developer.apple.com/help/account/membership/program-enrollment?utm_source=openai))
 
 Chrome Web Store + native-messaging host
 
-[D] These solve different problems: the store distributes the extension; native messaging changes how it talks to a companion. The native host still needs installation.
+[A] Effort: several additional days once the companion is packageable; review elapsed time is uncertain.
 
-[A] Effort is several days to weeks beyond a stable companion, with ongoing browser-integration and release work. [D] Native messaging can narrow the exposed browser-to-engine interface, but it does not replace URL validation, queue limits, or safe subprocess handling.
+Chrome native messaging requires an installed host and a host manifest identifying allowed extension origins. The store extension therefore does not eliminate the companion installation. Store publishing also requires developer registration and a one-time fee. ([developer.chrome.com](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging?authuser=160&utm_source=openai))
 
-[D] Do not make this architectural migration a prerequisite for proving that strangers can use the product.
+[D] This combination has the best eventual adoption story: ordinary extension installation plus an identifiable, managed companion. Use native messaging for commands/status, not as a reason to rewrite inference.
 
 Hosted service
 
-[D] This adds account/abuse controls, operating costs, media-upload privacy, retention decisions, and service availability to a project whose stated goal is reputation rather than revenue. [A] It is the highest ongoing burden of these options.
+[A] Effort: several weeks for even a responsibly operated version, followed by continuing operational work.
 
-[D] It also changes the trust proposition substantially. Reject it unless evidence later shows that local installation—not caption quality or source access—is the dominant obstacle.
+[D] Reject this direction for the stated goal. You would acquire abuse prevention, billing exposure, uploaded-audio privacy, retention and service availability obligations. Moving retrieval server-side would also require revalidating access to streams available in the viewer’s browser.
 
-3. Architecture: keep Python and localhost, constrain the boundary
+[D] A static demo and documentation site are worth hosting. A free film-processing backend is not the same investment.
 
-[D] The current shape is appropriate for this stage. A local engine can own downloader and inference subprocesses independently of the overlay. Moving inference into the extension would be a new implementation effort, not simply a packaging improvement.
+3. Architecture: keep native inference; change the boundary gradually
 
-[D] WASM/WebGPU should be a separate experiment with an explicit acceptance test on the target hardware. Nothing supplied establishes comparable model support, speed, memory use, or caption quality in that environment.
+[D] Localhost HTTP is a reasonable developer architecture. Replacing ThreadingHTTPServer with a framework would not fix the observed defects.
 
-[D] A native-messaging adapter can be added later without rewriting the inference pipeline. Separate the job API from its HTTP transport now.
+[D] Preserve three boundaries:
 
-What breaks first:
+    Extension: discover media, obtain consent, render captions.
+    Transport: authenticated HTTP now; native messaging later.
+    Engine: durable jobs, subprocesses, providers and inference.
 
-- [E] The server is threaded and processing launches additional download work. [D] If admission control is absent, concurrent tabs can compete for memory, compute, network, and disk. The excerpts do not establish current limits.
-- [E] Jobs are described as cached by URL and language. [D] If that is the complete identity, changed media at the same URL or changed generation settings can reuse the wrong result. Verify the implementation; include stable media identity and result-affecting settings where appropriate.
-- [D] Across more users, source extraction differences, credentials, and release mismatches are more immediate risks than scaling a shared server: each user runs their own engine.
+[E] The engine has a two-job semaphore, while additional jobs create threads; prefetch/refinement/alignment have separate execution paths. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/server.py))
 
-[E] In the shown cloud branch, prefix fetching is skipped and the code waits for the full download before preparing chunks. [D] Improving that path’s time to first useful caption may matter more than substituting a faster model. The snippet does not establish that later cloud processing streams around this bottleneck.
+[D] What breaks first “at scale” is per-machine contention and support variability, not aggregate HTTP traffic. Bound admission, serialise scarce inference resources, limit disk usage and make all expensive operations use the scheduler. More installations do not share one local engine.
 
-4. Speech translation: benchmark a replacement, do not assume one
+[D] Do not move the current workload into MV3’s background worker. Chrome workers can terminate on inactivity and long operations. Browser Whisper implementations exist, but that does not establish equivalent performance or quality for this workload. ([developer.chrome.com](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle))
 
-[E] The cloud mode already represents the proposed end-to-end shape at the application level: audio goes in and translated cues come back. [D] The question is therefore which implementation produces better usable subtitles—not whether two stages are intrinsically worse.
+[D] WASM/WebGPU is a separate experimental backend, not an installation fix you get for free. Tab-audio capture is likewise a separate acquisition strategy: Chrome requires user invocation and introduces capture/audio-routing behavior. It deserves a later experiment if stream fetching proves the dominant compatibility problem. ([developer.chrome.com](https://developer.chrome.com/docs/extensions/reference/api/tabCapture))
+
+4. Pipeline: should speech translation replace ASR → translation?
+
+[D] Not as the next architectural move. Compare complete subtitle systems, not their number of model calls.
+
+[E] You already have an end-to-end cloud path: cloud_asr.py sends audio to a multimodal model and requests translated, timestamped cues. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/cloud_asr.py))
+
+[D] The useful comparison is therefore:
+
+    Existing track, possibly translated.
+    Local ASR plus text translation.
+    Direct cloud speech translation.
+    A candidate direct local speech-translation model.
 
 Quality
 
-[D] A direct speech-translation model could avoid propagating some transcription errors, but it can also make source errors harder to inspect and repair. Separate ASR and translation preserve a source transcript for debugging, retranslating, and same-language alignment.
+[D] Direct translation might avoid propagating a mistaken intermediate transcript, but it can also make omissions harder to inspect. A cascade preserves source text for bilingual display, correction, alignment and retranslation. Neither property proves which output viewers will prefer.
 
-[E] No comparative subtitle-quality evaluation is supplied. [D] There is no basis here to claim a material quality advantage for either approach.
+SeamlessM4T provides multilingual direct speech-to-text translation. Its published capabilities are a reason to benchmark it, not evidence that it improves foreign-film subtitles on this Mac. ([ai.meta.com](https://ai.meta.com/research/seamless-communication?utm_source=openai))
 
 Latency
 
-[E] The measured local path spends 94–97% of wall time in ASR. [D] Removing the relatively small translation stage cannot remove the dominant delay. A replacement must make speech processing faster or produce useful cues earlier while retaining acceptable timing and meaning.
+[D] The cascade already overlaps translation with subsequent transcription. Removing translation does not remove the dominant ASR work. Measure first usable dialogue and caption availability at the playback position, not only whole-film completion.
+
+For an English-only experiment, Whisper supports direct speech-to-English translation, but the turbo model is explicitly not trained for that task. Testing it properly requires a different model; adding a translation flag to the current turbo path is not a valid comparison. ([github.com](https://github.com/openai/whisper))
 
 Cost
 
-[E] The cloud estimate is about $0.30 per film on the supplied test. [D] That is not a general cost guarantee, and the supplied text does not establish a complete cost comparison against the separate pipeline.
+[D] Direct cloud translation trades local computation for audio-upload inference. Its actual advantage depends on model, chunk size, retries, timestamp repair and quality acceptance. The README’s reported cloud-film cost is not enough to establish that comparison. [E] ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/README.md))
 
-[D] Compare candidates on the same clips: meaning preservation, omissions/hallucinations, cue timing, time to first useful caption, total completion time, and actual billed cost. Keep the two-stage path until a replacement wins on the outcomes that matter.
+[D] Run a small fixed comparison covering quiet dialogue, music, overlapping speech and multiple languages. Score omissions, meaning errors, terminology consistency, readable segmentation and timestamp error. Keep the cascade unless the alternative wins on the experience you intend to support.
 
-5. What to cut or demote
+5. Where the owner’s assumptions are wrong
 
-- [D] Demote fully local translation to an experimental/offline option. [E] The supplied measurements show slower translation and visible quality loss, with memory constraints. [D] It should not complicate the default onboarding.
-- [D] Remove the deep pass from the primary interface until it demonstrates a quality improvement on a fixed evaluation set. [E] Its execution time is measured; its benefit is not quantified here.
-- [D] Cut “any video” as the headline claim. [E] DRM is excluded and some no-caption YouTube downloads fail. [D] Describe supported source types and known exceptions instead.
-- [D] Do not prioritise Windows/Linux packaging, hosted accounts, or cross-tab polish before the Mac acceptance path works.
-- [D] Do not market “Check sync” as general release matching. [E] Its matcher only considers cues within eight seconds of recognised segment starts, and can reuse a cue for multiple matches. [D] Match count alone therefore does not establish independent evidence or correction of large offsets, drift, or edits.
+“The four rungs describe what every request does.”
 
-6. Where the owner’s assumptions are wrong
+[E] Cloud execution depends on explicit mode selection; availability checks for a key, not usable credit. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/server.py))
 
-“Coverage is a sync gate.”
+[D] Describe a policy-controlled router, not an unconditional cheapest-first ladder. Publish the actual decision rules, including consent and fallbacks.
 
-[D] Runtime coverage can reject obviously incomplete or overlong tracks; it cannot establish that dialogue aligns throughout the film. Keep coverage, identity, and synchronization as separate confidence checks.
+“Runtime coverage is a sync gate.”
 
-“The speech-rate filter identifies music hallucinations.”
+[E] providers.accept() checks cue count and first/last timestamps. It does not establish content identity or local alignment. A synthetic unrelated track passed my runtime-coverage probe. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/providers.py))
 
-[E] The filter rejects low character-rate segments using fixed duration thresholds. [D] This can also reject a genuine short utterance inside an overlong ASR segment. It is a heuristic trading false positives against false negatives, not a language-independent proof that speech is absent.
+[D] Call it a duration-plausibility gate. Separate “candidate found,” “duration plausible” and “sync verified.” Check sync searches only a limited timing neighborhood and applies a constant offset; it is not a general repair for different edits or drift. [E] ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/captions.py))
 
-“Only cue text leaves the machine.”
+“The music filter knows this cannot be human speech.”
 
-[E] The README says this, while cloud mode sends audio and library lookup uses title-based external services. [D] Replace it with route-specific disclosure, including what warming the panel sends or downloads before the caption button is pressed.
+[E] The speech-rate filter uses raw characters per second with fixed thresholds. Its lang argument does not calibrate those thresholds. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/captions.py))
 
-“Fully local means offline.”
+[D] Sparse text over a long ASR segment can also mean poor segmentation, pauses or sparse dialogue. Treat this as a heuristic with false-negative tests, not a language-independent truth.
 
-[E] The shown local-translator condition skips library lookup, but native probing and downloads still precede ASR. [D] Distinguish “local inference” from “no network access”; the latter is not established.
+“Local means nothing leaves the machine.”
 
-“Packaging makes it production-ready.”
+[E] The default local-ASR path can use cloud text translation; the cloud-audio path uploads audio. The current panel and README contain broader privacy wording. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/extension/content.js))
 
-[D] Packaging removes installation work. It does not make a wrong track correct, an empty result successful, or an unauthorised local request safe.
+[D] Name the modes by data flow: “local transcription + cloud translation,” “cloud audio,” and “offline inference.” State what leaves before work begins.
 
-7. The three objections a hostile reviewer would lead with
+6. What to cut
 
-1) “Your privacy story contradicts your implementation.”
+[D] Remove these from the supported release surface:
 
-[E] The blanket text-only disclosure conflicts with the described audio-upload route. [D] Cheapest honest pre-emption: fix the wording immediately, show route-specific data disclosure, and require explicit cloud consent. Audit the localhost authorisation boundary before recommending broad installation.
+    Fully local LLM translation: retain experimental code only if wanted.
+    The bespoke LAN handoff installer: use one published release path.
+    Arbitrary backend URLs: fix loopback pairing rather than supporting remote engines.
+    Automatic deep refinement: expose one advanced “Refine translation” action.
+    Universal-site and cross-platform implications: publish tested cases instead.
 
-2) “This is a one-film demo marketed as universal.”
+[E] Offline-model installation and discovery currently disagree about checkout paths, and discovery includes an author-specific workspace. The handoff installer also assumes a checkout name different from the README clone path. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/allsubs))
 
-[E] End-to-end validation is concentrated on one film. [D] Cheapest honest pre-emption: publish a bounded compatibility matrix, a rights-cleared reproducible demo, and deterministic fallback tests. Say “tested on” rather than “works on.”
+[D] Those are maintenance branches without enough demonstrated user value to justify expanding them now.
 
-3) “You call a track safe because it has roughly the right runtime.”
+[D] Keep retrieval, ordinary local ASR, optional cloud inference, manual timing correction and VTT export. Stop adding providers, model choices and decoder tuning until the supported path is reproducible.
 
-[E] Release mismatch is known, the speech filter is heuristic, and the alignment routine has a bounded matching neighborhood. [D] Cheapest honest pre-emption: expose provenance and uncertainty, provide manual offset/reject/regenerate controls, and publish failed examples alongside successful ones.
+7. The three objections a hostile reviewer should lead with
 
-[D] The next release should prove a bounded path from clean installation to useful, recoverable captions. Another model or another mode would be a weaker reputation investment.
+1) “Your privacy promises are not enforced.”
+
+[E] The offline-routing and synthetic-control probes support this objection; they are not hypothetical concerns about plaintext key storage.
+
+[D] Cheapest honest pre-emption: fix policy enforcement and privileged consent, publish a data-flow table, add no-network regression tests and rotate the previously exposed key. Do not imply that rotation was performed as part of this review.
+
+2) “You have demonstrated a successful film, not a reliable subtitle system.”
+
+[E] The duration gate, timing matcher defects and assertion-free browser script leave that distinction unresolved. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/engine/providers.py))
+
+[D] Cheapest honest pre-emption: publish separate retrieval and generation demonstrations, a small rights-cleared fixture set, measured failures and independent installer reports. Label unsupported cases plainly.
+
+3) “The quickest path still makes me install the expensive fallback first.”
+
+[E] The current setup requirements substantiate this complaint. ([raw.githubusercontent.com](https://raw.githubusercontent.com/mattdani21/all-subs/9a11ee94346633a1e6e3f9ba325510d3d4716378/allsubs))
+
+[D] Cheapest honest pre-emption: retrieval-first setup, deferred model download and a reproducible first-run example. That improves adoption more directly than a new inference architecture.
+
+[D] Bottom line: earn credibility through enforced boundaries, recoverable failures and reproducible results. The next release should demonstrate less breadth and substantially more certainty.
