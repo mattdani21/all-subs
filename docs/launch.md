@@ -11,7 +11,26 @@ ASR 11–17 min for 116 min; fully local needs 16 GB+.
 
 ---
 
-## LinkedIn
+## LinkedIn — short (use this one)
+
+Every AI feature I build starts with a question: has someone already done this?
+
+All Subs captions any video. It looks for an existing subtitle track first — 1,072 cues
+in 8 seconds on a 116-minute film — and only transcribes and translates when nothing
+usable exists. If the audio must stay on the machine, whisper runs locally and only the
+text leaves.
+
+Four rungs: retrieve, cloud, local ASR, fully local. The gates matter more than the
+models — the first track I retrieved was a different film's subtitles, ending 22 minutes
+after the credits.
+
+Open source, MIT. macOS, terminal install, rough edges documented.
+
+https://github.com/mattdani21/all-subs
+
+---
+
+## LinkedIn — long variant
 
 Most AI features have one setting: generate. Mine has four, and it only generates when it
 has to.
