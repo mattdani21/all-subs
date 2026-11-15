@@ -411,6 +411,14 @@ def filter_segments(segs, silences, lang=None):
 
         if conf < 0.40:
             continue
+        # Speech rate sanity: a long segment with almost no words is whisper
+        # captioning music ("see you in the next video"). 0.4 chars/s over 30 s
+        # is not human speech in any language.
+        cps = len(text) / dur
+        if dur >= 10 and cps < 1.2:
+            continue
+        if dur >= 6 and cps < 0.8:
+            continue
         if silent / dur > 0.6 or (mid_silent and dur > 20):
             continue
         repeats = counts.get(key, 0)
@@ -610,7 +618,10 @@ def split_display(cues, limit_seconds=None):
         text = cue["src"].strip()
         budget = CUE_MAX_CJK if is_cjk(text) else CUE_MAX_LATIN
         if len(text) <= budget or cue["end"] - cue["start"] < 1.2:
-            out.append(dict(cue))
+            single = dict(cue)
+            if single["end"] - single["start"] > 8.0:
+                single["end"] = round(single["start"] + 8.0, 3)
+            out.append(single)
             continue
         parts = []
         buf = ""
