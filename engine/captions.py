@@ -484,6 +484,60 @@ def transcribe_chunk(path, base, language="auto"):
     return segs, lang
 
 
+def _wav_frames(path, frame_ms=20):
+    import array
+    import wave
+    with wave.open(path, "rb") as fh:
+        rate = fh.getframerate()
+        width = fh.getsampwidth()
+        raw = fh.readframes(fh.getnframes())
+    if width != 2:
+        return [], frame_ms / 1000.0
+    samples = array.array("h")
+    samples.frombytes(raw)
+    step = max(1, int(rate * frame_ms / 1000))
+    frames = []
+    for i in range(0, len(samples), step):
+        block = samples[i:i + step]
+        if not block:
+            break
+        acc = 0
+        for v in block:
+            acc += v * v
+        frames.append((acc / len(block)) ** 0.5)
+    return frames, frame_ms / 1000.0
+
+
+def snap_to_onsets(cues, wav_path, max_shift=0.7):
+    """Move each cue start to the first speech frame near it, killing lead-in slop."""
+    try:
+        frames, step = _wav_frames(wav_path)
+    except Exception:
+        return cues
+    if not frames:
+        return cues
+    floor = sorted(frames)[int(len(frames) * 0.2)] or 1.0
+    moved = 0
+    for c in cues:
+        lo = max(0, int((c["start"] - 0.45) / step))
+        hi = min(len(frames) - 1, int((c["start"] + max_shift) / step))
+        seg = frames[lo:hi + 1]
+        if not seg:
+            continue
+        peak = max(seg)
+        thresh = max(floor * 3.0, peak * 0.18)
+        for i, v in enumerate(seg):
+            if v >= thresh:
+                t = (lo + i) * step
+                if t > c["start"] + 0.02:
+                    c["start"] = round(t, 3)
+                    moved += 1
+                break
+        if c["end"] <= c["start"]:
+            c["end"] = round(c["start"] + 0.8, 3)
+    return cues
+
+
 def is_cjk(text):
     return len(re.findall(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]", text)) > len(text) * 0.3
 

@@ -406,6 +406,7 @@ def _run_job(job):
                 c["start"] = round(c["start"] + offset, 3)
                 c["end"] = round(c["end"] + offset, 3)
             cues = captions.split_display(cues)
+            cues = captions.snap_to_onsets(cues, path)
             timings["asr"] += time.time() - t0
             if cues:
                 pending.put(cues)
@@ -469,6 +470,7 @@ def _cloud_pass(job, chunks, lang):
     def work(item):
         idx, (path, offset, length) = item
         cues, usage = cloud_asr.transcribe_chunk(path, lang, job.target)
+        cues = captions.snap_to_onsets(cues, path)
         for c in cues:
             c["start"] = round(c["start"] + offset, 3)
             c["end"] = round(c["end"] + offset, 3)

@@ -5,7 +5,7 @@ const DEFAULTS = {
   bilingual: true,
   deep: false,
   local: false,
-  cloudAsr: false
+  mode: 'local'
 };
 
 let cfg = Object.assign({}, DEFAULTS);
@@ -60,7 +60,7 @@ function fill() {
   $('bilingual').checked = !!cfg.bilingual;
   $('deep').checked = !!cfg.deep;
   $('local').checked = !!cfg.local;
-  $('cloud').checked = !!cfg.cloudAsr;
+  $('cloud').checked = cfg.mode === 'cloud';
 }
 
 function collectPrefs() {
@@ -70,7 +70,7 @@ function collectPrefs() {
     bilingual: $('bilingual').checked,
     deep: $('deep').checked,
     local: $('local').checked,
-    cloudAsr: $('cloud').checked
+    mode: $('cloud').checked ? 'cloud' : 'local'
   };
 }
 

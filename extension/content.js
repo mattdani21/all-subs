@@ -16,7 +16,7 @@
     bilingual: true,
     deep: false,
     local: false,
-    cloudAsr: false
+    mode: 'local'
   };
   const LANGS = [
     ['en', 'English'], ['zh', 'Chinese'], ['ko', 'Korean'], ['ja', 'Japanese'],
@@ -75,6 +75,12 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .status { color: #9aa4b2; font-size: 12px; min-height: 17px; margin-bottom: 10px; }
     .status.err { color: #fca5a5; }
+    .seg { display: flex; gap: 4px; background: #151a21; border: 1px solid rgba(255,255,255,.1);
+           border-radius: 9px; padding: 3px; margin: 4px 0 6px; }
+    .segbtn { flex: 1; background: none; border: 0; color: #9aa4b2; font: 600 12px -apple-system, sans-serif;
+              padding: 6px 4px; border-radius: 7px; cursor: pointer; }
+    .segbtn.on { background: #e8ecf2; color: #0b0d10; }
+    .seghint { color: #6b7280; font-size: 11px; margin-bottom: 8px; min-height: 14px; }
     .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
     label { color: #9aa4b2; font-size: 12px; }
     select {
@@ -130,6 +136,11 @@
       '<div class="body">',
       '<div class="title" data-el="title">No video selected</div>',
       '<div class="status" data-el="status">Ready.</div>',
+      '<div class="seg" data-el="seg">',
+      '<button class="segbtn on" data-mode="local">This Mac</button>',
+      '<button class="segbtn" data-mode="cloud">Cloud</button>',
+      '</div>',
+      '<div class="seghint" data-el="seghint">Transcribes with whisper on this Mac. Nothing leaves it.</div>',
       '<div class="row"><label>Captions in</label><select data-el="lang"></select></div>',
       '<div class="row"><label class="check"><input type="checkbox" data-el="deep"> Deep read (the model watches the whole film first)</label></div>',
       '<div class="row"><label class="check"><input type="checkbox" data-el="local"> Translate offline on this Mac (4B model, slower)</label></div>',
@@ -137,8 +148,8 @@
       '<div class="bar"><i data-el="bar"></i></div>',
       '<div class="foot">',
       '<button class="mini" data-el="bilingual">Bilingual</button>',
-      '<button class="mini" data-el="minus">−0.3s</button>',
-      '<button class="mini" data-el="plus">+0.3s</button>',
+      '<button class="mini" data-el="minus">−0.1s</button>',
+      '<button class="mini" data-el="plus">+0.1s</button>',
       '<button class="mini" data-el="reload">Re-sync</button>',
       '<button class="mini" data-el="settings">Settings</button>',
       '</div>',
@@ -170,8 +181,15 @@
       cfg.bilingual = !cfg.bilingual; saveCfg(); paintConfig();
       if (S.overlay) S.overlay.setBilingual(cfg.bilingual);
     });
-    q('minus').addEventListener('click', function () { adjustOffset(-0.3); });
-    q('plus').addEventListener('click', function () { adjustOffset(0.3); });
+    q('minus').addEventListener('click', function () { adjustOffset(-0.1); });
+    q('plus').addEventListener('click', function () { adjustOffset(0.1); });
+    root.querySelectorAll('.segbtn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        cfg.mode = btn.getAttribute('data-mode');
+        saveCfg();
+        paintConfig();
+      });
+    });
     q('settings').addEventListener('click', function () {
       if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
     });
@@ -231,6 +249,15 @@
     if (deep) deep.checked = !!cfg.deep;
     const local = S.root.querySelector('[data-el="local"]');
     if (local) local.checked = !!cfg.local;
+    if (S.root) {
+      S.root.querySelectorAll('.segbtn').forEach(function (b) {
+        b.classList.toggle('on', b.getAttribute('data-mode') === (cfg.mode || 'local'));
+      });
+      const hint = S.root.querySelector('[data-el="seghint"]');
+      if (hint) hint.textContent = cfg.mode === 'cloud'
+        ? 'One multimodal call per chunk. Fastest; audio leaves this Mac (~$0.30 per film).'
+        : 'Transcribes with whisper on this Mac. Audio stays local.';
+    }
     const bi = S.root.querySelector('[data-el="bilingual"]');
     if (bi) bi.classList.toggle('on', !!cfg.bilingual);
   }
@@ -378,7 +405,7 @@
         body: {
           url: url, target: cfg.target, mode: cfg.deep ? 'deep' : 'fast',
           translator: cfg.local ? 'local' : 'cloud',
-          asr: cfg.cloudAsr ? 'cloud' : 'local',
+          asr: cfg.mode === 'cloud' ? 'cloud' : 'local',
           duration: Math.round((S.video && S.video.duration) || 0),
           media_url: mediaCandidate(),
           title: (document.title || '').slice(0, 200),

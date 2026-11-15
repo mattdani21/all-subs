@@ -48,6 +48,7 @@ async def main():
             return {open: !r.querySelector('.panel').hidden,
                     status: r.querySelector('.status').textContent,
                     settings: !!r.querySelector('[data-el="settings"]'),
+                    seg: [...r.querySelectorAll('.segbtn')].map(b => b.textContent + (b.classList.contains('on') ? '*' : '')),
                     localDisabled: r.querySelector('[data-el="local"]').disabled};
         }""")
         print("panel:", panel)

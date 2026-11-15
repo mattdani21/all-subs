@@ -5,7 +5,7 @@ chrome.runtime.onInstalled.addListener(function () {
     bilingual: true,
     deep: false,
     local: false,
-    cloudAsr: false
+    mode: 'local'
   }, function (v) { chrome.storage.sync.set(v); });
 });
 
