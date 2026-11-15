@@ -5,3 +5,8 @@ __pycache__/
 test/*.png
 .env
 dist/
+docs/review-deepseek.md
+docs/review-gpt61.md
+docs/review-gemini.md
+docs/review-opus*.md
+docs/review-gpt*.md

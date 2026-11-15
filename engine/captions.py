@@ -176,18 +176,39 @@ def download_native_subs(url, lang, dest_base):
 
 # ---------------------------------------------------------------- media
 
+def _yt_clients(url):
+    """YouTube needs a working player client; the web client now 403s on media."""
+    if "youtube.com" in url or "youtu.be" in url:
+        return [["--extractor-args", "youtube:player_client=%s" % c]
+                for c in ("mweb", "ios", "web")]
+    return [[]]
+
+
 def download_audio_range(url, workdir, seconds=120, timeout=300, cookies=False):
     """Fetch only the opening seconds (yt-dlp sections), for first-caption latency."""
     out = os.path.join(workdir, "prefix.%(ext)s")
-    cmd = [YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best"]
+    base = [YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best"]
     if cookies:
-        cmd += ["--cookies-from-browser", "chrome"]
-    run(cmd + ["--download-sections", "*0-%d" % int(seconds), "-o", out, url],
-        timeout=timeout)
-    for name in os.listdir(workdir):
-        if name.startswith("prefix."):
-            return os.path.join(workdir, name)
-    raise RuntimeError("section download produced no file")
+        base += ["--cookies-from-browser", "chrome"]
+    last = None
+    for extra in _yt_clients(url):
+        for name in os.listdir(workdir):
+            if name.startswith("prefix."):
+                try:
+                    os.remove(os.path.join(workdir, name))
+                except OSError:
+                    pass
+        try:
+            run(base + extra + ["--download-sections", "*0-%d" % int(seconds),
+                                "-o", out, url], timeout=timeout)
+        except Exception as exc:
+            last = exc
+            continue
+        for name in os.listdir(workdir):
+            if name.startswith("prefix."):
+                return os.path.join(workdir, name)
+        last = RuntimeError("section download produced no file")
+    raise last or RuntimeError("section download failed")
 
 
 def youtube_id(url):
@@ -240,17 +261,31 @@ def download_audio(url, workdir, key=None, cookies=False):
             if os.path.exists(cached) and os.path.getsize(cached) > 100000:
                 return cached
     out = os.path.join(workdir, "audio.%(ext)s")
-    cmd = [YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best"]
+    base = [YTDLP, "--no-warnings", "--no-playlist", "-f", "bestaudio/best"]
     if cookies:
-        cmd += ["--cookies-from-browser", "chrome"]
-    run(cmd + ["-o", out, url], timeout=3600)
-    for name in os.listdir(workdir):
-        if name.startswith("audio."):
-            path = os.path.join(workdir, name)
-            if key:
-                shutil.copyfile(path, os.path.join(media_cache, key + os.path.splitext(name)[1]))
-            return path
-    raise RuntimeError("audio download produced no file")
+        base += ["--cookies-from-browser", "chrome"]
+    last = None
+    for extra in _yt_clients(url):
+        for name in list(os.listdir(workdir)):
+            if name.startswith("audio."):
+                try:
+                    os.remove(os.path.join(workdir, name))
+                except OSError:
+                    pass
+        try:
+            run(base + extra + ["-o", out, url], timeout=3600)
+        except Exception as exc:
+            last = exc
+            continue
+        for name in os.listdir(workdir):
+            if name.startswith("audio."):
+                path = os.path.join(workdir, name)
+                if key:
+                    shutil.copyfile(path, os.path.join(media_cache,
+                                                       key + os.path.splitext(name)[1]))
+                return path
+        last = RuntimeError("audio download produced no file")
+    raise last or RuntimeError("audio download failed")
 
 
 def duration_of(path):
