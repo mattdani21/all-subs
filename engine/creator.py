@@ -59,51 +59,70 @@ def translate(cues, target="en", title=""):
     return cues
 
 
-def review(cues, source_lang, target="en", batch=30):
-    """Second model checks meaning, omissions and fluency; returns issues + fixes."""
-    issues, fixes, scores = [], {}, []
-    for start in range(0, len(cues), batch):
-        group = cues[start:start + batch]
+def review(cues, source_lang, target="en", batch=20, workers=6):
+    """Second model checks meaning, omissions and fluency; returns issues + score.
+
+    Only lines that need a fix are returned by the model; asking for a verdict on every
+    line made the JSON hit max_tokens and silently produced "0 issues".
+    """
+    import concurrent.futures as cf
+
+    groups = [cues[i:i + batch] for i in range(0, len(cues), batch)]
+
+    def run_group(group):
         payload = [{"id": c["i"], "source": c.get("src", ""), "translation": c.get("dst", "")}
                    for c in group]
         system = (
-            "You are a bilingual subtitle editor. For each pair, judge whether the %s "
-            "translation is accurate, complete and natural English suitable for a YouTube "
-            "caption track. Flag: wrong meaning, omitted content, added content, mistranslated "
-            "names, unnatural phrasing, or lines that read as literal machine output. "
-            "Reply with JSON only: {\"lines\":[{\"id\":N,\"verdict\":\"ok|fix\","
-            "\"problem\":\"short reason\",\"fixed\":\"corrected English or empty\"}],"
-            "\"score\":0-100}. Score is overall caption quality for this batch."
-            % target)
+            "You are a bilingual subtitle editor. Judge each %s translation for accuracy, "
+            "completeness and natural English suitable for a YouTube caption track. "
+            "Return JSON only, and include ONLY the lines that need changing: "
+            "{\"lines\":[{\"id\":N,\"problem\":\"short reason\",\"fixed\":\"corrected English\"}],"
+            "\"score\":0-100}. Omit every line that is already correct. Never return a line "
+            "with an empty or unchanged fix." % target)
         user = "Source language: %s\n%s" % (source_lang, json.dumps(payload, ensure_ascii=False))
-        data = _api({"model": REVIEWER_MODEL, "messages": [
-            {"role": "system", "content": system}, {"role": "user", "content": user}],
-            "response_format": {"type": "json_object"}, "temperature": 0.1, "max_tokens": 8000})
+        try:
+            data = _api({"model": REVIEWER_MODEL, "messages": [
+                {"role": "system", "content": system}, {"role": "user", "content": user}],
+                "response_format": {"type": "json_object"}, "temperature": 0.1,
+                "max_tokens": 4000,
+                # The reviewer was spending ~2,800 hidden reasoning tokens per batch for a
+                # 280-character answer: 20 s per batch instead of 3 s, with no better fixes.
+                "thinking": {"type": "disabled"}})
+        except Exception as exc:
+            return [], None, str(exc)[:120]
         text = (data["choices"][0]["message"]["content"] or "").strip()
         try:
             parsed = json.loads(text)
         except ValueError:
-            print("review: batch at %d returned unparseable JSON (%s); splitting"
-                  % (start, data["choices"][0].get("finish_reason")), file=sys.stderr)
-            if len(group) > 4:
+            if len(group) > 5:
                 half = len(group) // 2
-                for sub in (group[:half], group[half:]):
-                    sub_issues, sub_score = review(sub, source_lang, target, batch=half)
-                    issues.extend(sub_issues)
-                    if sub_score is not None:
-                        scores.append(sub_score)
-            continue
-        if isinstance(parsed.get("score"), (int, float)):
-            scores.append(float(parsed["score"]))
+                a = run_group(group[:half])
+                b = run_group(group[half:])
+                return (a[0] + b[0]), (a[1] if a[1] is not None else b[1]), None
+            return [], None, "unparseable JSON"
+        score = parsed.get("score")
+        fixes = []
         for line in parsed.get("lines", []):
-            if line.get("verdict") == "fix" and line.get("fixed"):
-                fixes[line["id"]] = line["fixed"].strip()
-                issues.append(line)
+            fixed = (line.get("fixed") or "").strip()
+            src = next((c.get("dst", "") for c in group if c["i"] == line.get("id")), "")
+            if fixed and fixed.strip() != src.strip():
+                fixes.append({"id": line.get("id"), "verdict": "fix",
+                              "problem": (line.get("problem") or "")[:160], "fixed": fixed})
+        return fixes, (float(score) if isinstance(score, (int, float)) else None), None
+
+    issues, scores, errors = [], [], []
+    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        for fixes, score, err in pool.map(run_group, groups):
+            issues.extend(fixes)
+            if score is not None:
+                scores.append(score)
+            if err:
+                errors.append(err)
+    fixes = {i["id"]: i["fixed"] for i in issues}
     for c in cues:
-        if c["i"] in fixes:
-            c["dst_reviewed"] = fixes[c["i"]]
-        else:
-            c["dst_reviewed"] = c.get("dst", "")
+        c["dst_reviewed"] = fixes.get(c["i"], c.get("dst", ""))
+    if errors:
+        print("review: %d batch(es) failed: %s" % (len(errors), errors[0]), file=sys.stderr)
     return issues, (round(sum(scores) / len(scores), 1) if scores else None)
 
 
