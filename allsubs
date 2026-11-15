@@ -45,8 +45,15 @@ case "${1:-status}" in
     else
       echo "model: $(du -h "$MODEL" | cut -f1) at $MODEL"
     fi
-    python3 -m pip install --user -q youtube-transcript-api 2>/dev/null \
-      && echo "youtube captions: installed" || echo "youtube captions: optional install failed"
+    if python3 -c "import youtube_transcript_api" 2>/dev/null; then
+      echo "youtube captions: present"
+    elif python3 -m pip install --user -q youtube-transcript-api 2>/dev/null; then
+      echo "youtube captions: installed"
+    elif python3 -m pip install --user -q --break-system-packages youtube-transcript-api 2>/dev/null; then
+      echo "youtube captions: installed (Homebrew Python)"
+    else
+      echo "youtube captions: optional install failed (YouTube native captions unavailable)"
+    fi
     if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" 2>/dev/null; then
       echo "python: $(python3 -V)"
     else
@@ -78,7 +85,8 @@ case "${1:-status}" in
     curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || { echo "offline (./allsubs start)"; ok=1; }
     printf "%-16s " "extension"; [ -f "$ROOT/extension/manifest.json" ] && echo "$ROOT/extension" || { echo missing; ok=1; }
     printf "%-16s " "youtube subs"
-    python3 -c "import youtube_transcript_api" 2>/dev/null && echo present || echo "missing (pip install --user youtube-transcript-api)"
+    python3 -c "import youtube_transcript_api" 2>/dev/null && echo present \
+      || echo "missing (./allsubs setup)"
     printf "%-16s " "chrome"; [ -d "/Applications/Google Chrome.app" ] && echo present || echo "not found"
     printf "%-16s " "port"
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
