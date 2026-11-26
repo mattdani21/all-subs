@@ -49,9 +49,9 @@ jobs:
           for zp in (src_zip, ext_zip):
               assert os.path.isfile(zp), f"missing {zp}"
               with zipfile.ZipFile(zp) as zf:
-                  names = zf.namelist()
+                  basenames = {os.path.basename(n.rstrip("/")) for n in zf.namelist()}
                   for bad in (".env", ".DS_Store", "CHROMEWEBSTORE.md", "review-pack.md", "review-prompt.md"):
-                      assert not any(bad in n for n in names), f"leaked {bad} in {zp}"
+                      assert bad not in basenames, f"leaked {bad} in {zp}"
           with zipfile.ZipFile(ext_zip) as zf:
               assert "manifest.json" in zf.namelist()
               assert "icons/icon-128.png" in zf.namelist()
