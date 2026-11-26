@@ -1,15 +1,25 @@
 """All Subs caption pipeline: probe -> native subs or ASR -> LLM translation."""
 from __future__ import annotations
 
+import array
+import bisect
+import concurrent.futures as cf
 import hashlib
+import http.client
 import json
+import operator
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import wave
+
+VERSION = "0.4.0"
 
 HOME = os.path.expanduser("~")
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +33,7 @@ FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
 YTDLP = shutil.which("yt-dlp") or os.path.expanduser("~/Library/Python/3.9/bin/yt-dlp")
 WHISPER_MODEL = os.path.expanduser("~/.whisper-models/ggml-large-v3-turbo.bin")
+WHISPER_THREADS = int(os.environ.get("ALLSUBS_WHISPER_THREADS") or min(8, max(4, os.cpu_count() or 4)))
 
 CHUNK_SECONDS = 300
 CUE_MAX_LATIN = 84
@@ -48,6 +59,8 @@ for d in (DATA_DIR, JOBS_DIR, CACHE_DIR):
 # ---------------------------------------------------------------- utilities
 
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+_ENV_MTIMES = {}
+_ENV_LOCK = threading.Lock()
 
 
 def load_config():
@@ -70,30 +83,54 @@ def save_config(data):
         os.chmod(CONFIG_PATH, 0o600)
     except OSError:
         pass
+    with _ENV_LOCK:
+        _ENV_MTIMES.clear()
 
 
-def load_env():
+def load_env(force=False):
     """Pull API keys from .env files, then the runtime config written by the UI."""
-    for path in (os.path.join(PROJECT_DIR, ".env"), os.path.join(HOME, ".hermes", ".env")):
-        if not os.path.exists(path):
-            continue
+    paths = (os.path.join(PROJECT_DIR, ".env"), os.path.join(HOME, ".hermes", ".env"), CONFIG_PATH)
+    with _ENV_LOCK:
+        if not force:
+            changed = False
+            for p in paths:
+                try:
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    mt = None
+                if _ENV_MTIMES.get(p) != mt:
+                    changed = True
+                    break
+            if not changed and _ENV_MTIMES:
+                return
+        for path in paths[:2]:
+            try:
+                _ENV_MTIMES[path] = os.path.getmtime(path)
+            except OSError:
+                _ENV_MTIMES[path] = None
+                continue
+            try:
+                with open(path) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip('"').strip("'")
+                        if k and v and k not in os.environ:
+                            os.environ[k] = v
+            except OSError:
+                pass
         try:
-            with open(path) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k, v = k.strip(), v.strip().strip('"').strip("'")
-                    if k and v and k not in os.environ:
-                        os.environ[k] = v
+            _ENV_MTIMES[CONFIG_PATH] = os.path.getmtime(CONFIG_PATH)
         except OSError:
-            pass
-    for env_name, cfg_name in (("DEEPSEEK_API_KEY", "deepseek_api_key"),
-                               ("WYZIE_API_KEY", "wyzie_api_key")):
+            _ENV_MTIMES[CONFIG_PATH] = None
         cfg = load_config()
-        if cfg.get(cfg_name) and not os.environ.get(env_name):
-            os.environ[env_name] = cfg[cfg_name]
+        for env_name, cfg_name in (("DEEPSEEK_API_KEY", "deepseek_api_key"),
+                                   ("WYZIE_API_KEY", "wyzie_api_key"),
+                                   ("OPENROUTER_API_KEY", "openrouter_api_key")):
+            if cfg.get(cfg_name) and not os.environ.get(env_name):
+                os.environ[env_name] = cfg[cfg_name]
 
 
 def run(cmd, timeout=1800, cwd=None):
@@ -298,33 +335,48 @@ def duration_of(path):
 
 
 def to_wav(src, dst):
-    run([FFMPEG, "-y", "-v", "error", "-i", src, "-ar", "16000", "-ac", "1",
+    run([FFMPEG, "-y", "-v", "error", "-vn", "-i", src, "-ar", "16000", "-ac", "1",
          "-c:a", "pcm_s16le", dst], timeout=1800)
     return dst
+
+
+def plan_chunks(total, chunk_seconds=CHUNK_SECONDS, limit=None, schedule=None,
+                start_at=0.0, first_index=0):
+    """Return [(idx, start, length), ...] without slicing audio yet."""
+    if limit:
+        total = min(total, float(limit))
+    if total <= 0:
+        raise RuntimeError("could not read audio duration")
+    plan = []
+    start = float(start_at)
+    idx = first_index
+    while start < total - 0.01:
+        sched_i = idx - first_index
+        want = schedule[sched_i] if schedule and 0 <= sched_i < len(schedule) else chunk_seconds
+        length = min(want, total - start)
+        plan.append((idx, start, length))
+        start += length
+        idx += 1
+    return plan
+
+
+def cut_chunk(src, workdir, idx, start, length):
+    """Extract one 16 kHz mono PCM chunk via fast input seeking."""
+    path = os.path.join(workdir, "chunk_%03d.wav" % idx)
+    run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", str(length),
+         "-i", src, "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", path],
+        timeout=600)
+    return path
 
 
 def split_wav(wav, workdir, chunk_seconds=CHUNK_SECONDS, limit=None, schedule=None,
               start_at=0.0, first_index=0):
     """Split audio into chunks; `schedule` overrides the first sizes."""
     total = duration_of(wav)
-    if limit:
-        total = min(total, float(limit))
-    if total <= 0:
-        raise RuntimeError("could not read audio duration")
-    out = []
-    start = float(start_at)
-    idx = first_index
-    while start < total - 0.01:
-        want = schedule[idx] if schedule and idx < len(schedule) else chunk_seconds
-        length = min(want, total - start)
-        path = os.path.join(workdir, "chunk_%03d.wav" % idx)
-        run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", str(length),
-             "-i", wav, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", path],
-            timeout=600)
-        out.append((path, start, length))
-        start += length
-        idx += 1
-    return out
+    plan = plan_chunks(total, chunk_seconds=chunk_seconds, limit=limit,
+                       schedule=schedule, start_at=start_at, first_index=first_index)
+    return [(cut_chunk(wav, workdir, idx, start, length), start, length)
+            for idx, start, length in plan]
 
 
 # ---------------------------------------------------------------- ASR
@@ -407,6 +459,14 @@ def silence_intervals(wav, noise_db=-45, min_dur=4.0):
     return spans
 
 
+def is_mostly_silent(silences, length, threshold=0.96):
+    """True when almost the entire chunk is silence (skip whisper completely)."""
+    if not silences or length <= 0:
+        return False
+    covered = sum(overlap(0.0, length, b, e) for b, e in silences)
+    return (covered / length) >= threshold
+
+
 ARTIFACTS = (
     "thank you", "thanks for watching", "thank you for watching", "please subscribe",
     "subtitles by", "字幕 by", "中文字幕", "字幕志愿者", "请不吝点赞", "订阅", "打赏",
@@ -478,26 +538,38 @@ def filter_segments(segs, silences, lang=None):
 
 
 def detect_language(wav, total, window_span=None):
-    """Language vote on three windows; returns (code, mean confidence)."""
+    """Language vote on up to three windows; early-exits on unanimous high confidence."""
     span = float(window_span or total or 0)
     votes = {}
     conf = []
-    for frac in (0.25, 0.55, 0.8):
-        start = max(0.0, span * frac - 15.0)
-        tmp = os.path.join(os.path.dirname(wav), "langprobe.wav")
-        subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", "20",
-                        "-i", wav, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", tmp],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
-        proc = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", tmp, "-dl", "-l", "auto"],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                              timeout=300)
-        blob = (proc.stdout or "") + (proc.stderr or "")
-        m = re.search(r"auto-detected language:\s*([a-zA-Z-]+)(?:\s*\(p = ([\d.]+)\))?", blob)
-        if m:
-            code = m.group(1).lower()
-            votes[code] = votes.get(code, 0) + 1
-            if m.group(2):
-                conf.append(float(m.group(2)))
+    tmp = os.path.join(os.path.dirname(wav), "langprobe.wav")
+    try:
+        for idx, frac in enumerate((0.25, 0.55, 0.8)):
+            start = max(0.0, span * frac - 15.0)
+            subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", "20",
+                            "-i", wav, "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", tmp],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+            proc = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", tmp, "-dl", "-l", "auto"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  timeout=300)
+            blob = (proc.stdout or "") + (proc.stderr or "")
+            m = re.search(r"auto-detected language:\s*([a-zA-Z-]+)(?:\s*\(p = ([\d.]+)\))?", blob)
+            if m:
+                code = m.group(1).lower()
+                votes[code] = votes.get(code, 0) + 1
+                if m.group(2):
+                    conf.append(float(m.group(2)))
+            # Early exit: if the first two windows unanimously agree with high confidence,
+            # a third whisper-cli launch cannot change the majority vote.
+            if idx == 1 and len(votes) == 1 and sum(votes.values()) == 2:
+                if conf and (sum(conf) / len(conf)) >= 0.85:
+                    break
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
     if not votes:
         return None, 0.0
     code = max(votes.items(), key=lambda kv: kv[1])[0]
@@ -507,8 +579,8 @@ def detect_language(wav, total, window_span=None):
 def transcribe_chunk(path, base, language="auto"):
     """Run whisper.cpp on one chunk; returns (segments, detected language)."""
     proc = subprocess.run(
-        [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", path, "-t", "8", "-l", language,
-         "-mc", "0", "-ojf", "-of", base],
+        [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", path, "-t", str(WHISPER_THREADS),
+         "-l", language, "-mc", "0", "-ojf", "-of", base],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1800)
     if proc.returncode != 0:
         raise RuntimeError("whisper failed: %s" % (proc.stderr or "")[-500:])
@@ -550,14 +622,57 @@ def text_sim(a, b):
     return 2.0 * len(A & B) / (len(A) + len(B))
 
 
+def _match_offset(observations, cues, window=30.0, min_sim=0.5):
+    """One-to-one greedy matching between recognised speech observations and cues.
+
+    Each observation is `(abs_start_sec, text)`. Each cue is matched at most once
+    (highest similarity first) so repeated phrases or loose windows cannot inflate
+    the match count. Returns `(diffs, matched_pairs)`.
+    """
+    if not observations or not cues:
+        return [], 0
+    ordered = sorted(enumerate(cues), key=lambda pair: pair[1]["start"])
+    starts = [c["start"] for _, c in ordered]
+    cue_shingles = [_shingles(c.get("src", "") or c.get("dst", "")) for _, c in ordered]
+
+    candidates = []
+    for obs_idx, (t, text) in enumerate(observations):
+        obs_sh = _shingles(text)
+        if not obs_sh:
+            continue
+        lo = bisect.bisect_left(starts, t - window)
+        hi = bisect.bisect_right(starts, t + window)
+        for pos in range(lo, hi):
+            c_sh = cue_shingles[pos]
+            if not c_sh:
+                continue
+            sc = 2.0 * len(obs_sh & c_sh) / (len(obs_sh) + len(c_sh))
+            if sc >= min_sim:
+                orig_idx, c = ordered[pos]
+                candidates.append((sc, -abs(t - c["start"]), obs_idx, orig_idx, t - c["start"]))
+
+    # Greedy one-to-one assignment: strongest text match first, closest timestamp breaks ties
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    used_obs = set()
+    used_cues = set()
+    diffs = []
+    for _sc, _neg_dt, obs_idx, cue_idx, diff in candidates:
+        if obs_idx in used_obs or cue_idx in used_cues:
+            continue
+        used_obs.add(obs_idx)
+        used_cues.add(cue_idx)
+        diffs.append(diff)
+    return diffs, len(diffs)
+
+
 def align_by_content(path, cues, total, windows=(0.2, 0.5, 0.8), duration=30):
-    """Measure subtitle offset by matching recognised speech to cue text.
+    """Measure subtitle offset by one-to-one matching recognised speech to cue text.
 
     Only meaningful when the subtitle language matches the audio; cross-language
     tracks produce almost no matches, and the caller should report that instead
     of shifting anything.
     """
-    diffs = []
+    observations = []
     langs = set()
     tmpdir = os.path.dirname(path)
     for i, frac in enumerate(windows):
@@ -568,35 +683,39 @@ def align_by_content(path, cues, total, windows=(0.2, 0.5, 0.8), duration=30):
         base = os.path.join(tmpdir, "align_%d" % i)
         try:
             run([FFMPEG, "-y", "-v", "error", "-ss", str(start), "-t", str(duration),
-                 "-i", path, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", clip],
+                 "-i", path, "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", clip],
                 timeout=300)
             segs, lang = transcribe_chunk(clip, base)
         except Exception:
             continue
+        finally:
+            for p in (clip, base + ".json"):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
         if lang:
             langs.add(lang)
         for seg in segs:
-            t = seg["start"] + start
-            best, score = None, 0.0
-            for c in cues:
-                if abs(c["start"] - t) > 8.0:
-                    continue
-                sc = text_sim(seg.get("src", ""), c.get("src", "") or c.get("dst", ""))
-                if sc > score:
-                    best, score = c, sc
-            if best is not None and score >= 0.5:
-                diffs.append(t - best["start"])
-    if len(diffs) < 6:
-        return None, len(diffs), None, sorted(langs)
+            observations.append((seg["start"] + start, seg.get("src", "")))
+    diffs, count = _match_offset(observations, cues, window=30.0, min_sim=0.5)
+    if count < 6:
+        return None, count, None, sorted(langs)
     diffs.sort()
-    med = diffs[len(diffs) // 2]
-    mad = sorted(abs(d - med) for d in diffs)[len(diffs) // 2]
-    return round(med, 2), len(diffs), round(mad, 2), sorted(langs)
+    med = diffs[count // 2]
+    mad = sorted(abs(d - med) for d in diffs)[count // 2]
+    return round(med, 2), count, round(mad, 2), sorted(langs)
+
+
+def _block_rms(samples):
+    if not samples:
+        return 0.0
+    # sum(map(mul, ...)) runs the inner multiply-accumulate loop in C instead of Python bytecode.
+    return (sum(map(operator.mul, samples, samples)) / len(samples)) ** 0.5
 
 
 def _wav_frames(path, frame_ms=20):
-    import array
-    import wave
     with wave.open(path, "rb") as fh:
         rate = fh.getframerate()
         width = fh.getsampwidth()
@@ -606,45 +725,72 @@ def _wav_frames(path, frame_ms=20):
     samples = array.array("h")
     samples.frombytes(raw)
     step = max(1, int(rate * frame_ms / 1000))
-    frames = []
-    for i in range(0, len(samples), step):
-        block = samples[i:i + step]
-        if not block:
-            break
-        acc = 0
-        for v in block:
-            acc += v * v
-        frames.append((acc / len(block)) ** 0.5)
+    frames = [_block_rms(samples[i:i + step]) for i in range(0, len(samples), step)]
     return frames, frame_ms / 1000.0
 
 
-def snap_to_onsets(cues, wav_path, max_shift=0.7):
-    """Move each cue start to the first speech frame near it, killing lead-in slop."""
+def snap_to_onsets(cues, wav_path, max_shift=0.7, frame_ms=20):
+    """Move each cue start to the first speech frame near it, killing lead-in slop.
+
+    Reads only sampled frames for the noise floor plus the small window around each cue,
+    avoiding full-file Python loops over millions of PCM samples.
+    """
+    if not cues:
+        return cues
     try:
-        frames, step = _wav_frames(wav_path)
+        with wave.open(wav_path, "rb") as fh:
+            rate = fh.getframerate()
+            width = fh.getsampwidth()
+            nframes = fh.getnframes()
+            if width != 2 or nframes <= 0 or rate <= 0:
+                return cues
+            step = max(1, int(rate * frame_ms / 1000))
+            step_sec = step / float(rate)
+
+            # Estimate noise floor from ~120 evenly spaced frames across the chunk.
+            total_blocks = max(1, nframes // step)
+            stride = max(1, total_blocks // 120)
+            floor_samples = []
+            for b in range(0, total_blocks, stride):
+                fh.setpos(b * step)
+                raw = fh.readframes(step)
+                if len(raw) < 2:
+                    break
+                buf = array.array("h")
+                buf.frombytes(raw)
+                floor_samples.append(_block_rms(buf))
+            if not floor_samples:
+                return cues
+            floor_samples.sort()
+            floor = floor_samples[int(len(floor_samples) * 0.2)] or 1.0
+
+            for c in cues:
+                lo_frame = max(0, int((c["start"] - 0.45) * rate))
+                hi_frame = min(nframes, int((c["start"] + max_shift) * rate) + step)
+                if hi_frame <= lo_frame:
+                    continue
+                fh.setpos(lo_frame)
+                raw = fh.readframes(hi_frame - lo_frame)
+                if len(raw) < 2:
+                    continue
+                buf = array.array("h")
+                buf.frombytes(raw)
+                seg = [_block_rms(buf[i:i + step]) for i in range(0, len(buf), step)]
+                if not seg:
+                    continue
+                peak = max(seg)
+                thresh = max(floor * 3.0, peak * 0.18)
+                base_sec = lo_frame / float(rate)
+                for i, v in enumerate(seg):
+                    if v >= thresh:
+                        t = base_sec + i * step_sec
+                        if t > c["start"] + 0.02:
+                            c["start"] = round(t, 3)
+                        break
+                if c["end"] <= c["start"]:
+                    c["end"] = round(c["start"] + 0.8, 3)
     except Exception:
         return cues
-    if not frames:
-        return cues
-    floor = sorted(frames)[int(len(frames) * 0.2)] or 1.0
-    moved = 0
-    for c in cues:
-        lo = max(0, int((c["start"] - 0.45) / step))
-        hi = min(len(frames) - 1, int((c["start"] + max_shift) / step))
-        seg = frames[lo:hi + 1]
-        if not seg:
-            continue
-        peak = max(seg)
-        thresh = max(floor * 3.0, peak * 0.18)
-        for i, v in enumerate(seg):
-            if v >= thresh:
-                t = (lo + i) * step
-                if t > c["start"] + 0.02:
-                    c["start"] = round(t, 3)
-                    moved += 1
-                break
-        if c["end"] <= c["start"]:
-            c["end"] = round(c["start"] + 0.8, 3)
     return cues
 
 
@@ -698,15 +844,113 @@ def split_display(cues, limit_seconds=None):
 
 # ---------------------------------------------------------------- LLM
 
-def llm_json(system, user, max_tokens=2600, temperature=0.2, retries=3):
-    """JSON-mode chat call. deepseek-flash with thinking off; deepseek-chat fallback."""
+_HTTPS_LOCAL = threading.local()
+_MODEL_LOCK = threading.Lock()
+_ACTIVE_MODEL = None  # (model_name, disable_thinking) cached once verified for the process
+_USAGE_LOCK = threading.Lock()
+
+# Approximate DeepSeek chat/flash list rates ($/1M tokens) for rough job telemetry.
+_COST_INPUT_MISS = 0.27 / 1e6
+_COST_INPUT_HIT = 0.07 / 1e6
+_COST_OUTPUT = 1.10 / 1e6
+
+
+class AuthError(RuntimeError):
+    """Non-retryable API key / permission error."""
+
+
+def new_usage():
+    return {"calls": 0, "prompt_tokens": 0, "cache_hit_tokens": 0,
+            "completion_tokens": 0, "estimated_usd": 0.0}
+
+
+def _record_usage(sink, payload_usage):
+    if sink is None or not isinstance(payload_usage, dict):
+        return
+    prompt = int(payload_usage.get("prompt_tokens") or 0)
+    completion = int(payload_usage.get("completion_tokens") or 0)
+    hit = int(payload_usage.get("prompt_cache_hit_tokens")
+              or (payload_usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    miss = max(0, prompt - hit)
+    cost = miss * _COST_INPUT_MISS + hit * _COST_INPUT_HIT + completion * _COST_OUTPUT
+    with _USAGE_LOCK:
+        sink["calls"] = sink.get("calls", 0) + 1
+        sink["prompt_tokens"] = sink.get("prompt_tokens", 0) + prompt
+        sink["cache_hit_tokens"] = sink.get("cache_hit_tokens", 0) + hit
+        sink["completion_tokens"] = sink.get("completion_tokens", 0) + completion
+        sink["estimated_usd"] = round(sink.get("estimated_usd", 0.0) + cost, 5)
+
+
+def _post_keepalive(host, path, body_bytes, headers, timeout=180):
+    """POST JSON over a thread-local keep-alive HTTPS connection (100% stdlib)."""
+    conns = getattr(_HTTPS_LOCAL, "conns", None)
+    if conns is None:
+        conns = {}
+        _HTTPS_LOCAL.conns = conns
+    for fresh in (False, True):
+        conn = conns.get(host)
+        if conn is None or fresh:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            conn = http.client.HTTPSConnection(host, timeout=timeout)
+            conns[host] = conn
+        try:
+            conn.timeout = timeout
+            conn.request("POST", path, body=body_bytes, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+            return resp.status, dict(resp.getheaders()), raw
+        except (http.client.HTTPException, OSError):
+            conns.pop(host, None)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if fresh:
+                raise
+
+
+def _parse_json_object(content):
+    """Parse JSON object from LLM text, tolerating stray fences/prose."""
+    text = (content or "").strip()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        obj = json.loads(text[start:end + 1])
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("LLM response was not a JSON object")
+
+
+def llm_json(system, user, max_tokens=4096, temperature=0.2, retries=3, usage=None):
+    """JSON-mode chat call with keep-alive, fail-fast 4xx fallback, and usage tracking."""
     load_env()
     key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
-    models = [(os.environ.get("ALLSUBS_MODEL", "deepseek-flash"), True)]
-    if models[0][0] != "deepseek-chat":
-        models.append(("deepseek-chat", False))
+    preferred = os.environ.get("ALLSUBS_MODEL", "deepseek-flash")
+    with _MODEL_LOCK:
+        active = _ACTIVE_MODEL
+    if active and (active[0] == preferred or preferred == "deepseek-flash"):
+        models = [active]
+    else:
+        models = [(preferred, True)]
+        if preferred != "deepseek-chat":
+            models.append(("deepseek-chat", False))
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + key,
+        "Connection": "keep-alive",
+    }
     last = None
     for model, no_think in models:
         body = {
@@ -719,68 +963,165 @@ def llm_json(system, user, max_tokens=2600, temperature=0.2, retries=3):
         }
         if no_think:
             body["thinking"] = {"type": "disabled"}
-        data = json.dumps(body).encode()
+        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
         for attempt in range(retries):
-            req = urllib.request.Request(
-                "https://api.deepseek.com/chat/completions", data=data,
-                headers={"Content-Type": "application/json",
-                         "Authorization": "Bearer " + key})
             try:
-                with urllib.request.urlopen(req, timeout=180) as resp:
-                    payload = json.loads(resp.read().decode())
-                content = payload["choices"][0]["message"]["content"]
-                return json.loads(content)
-            except (urllib.error.URLError, KeyError, ValueError, TimeoutError) as exc:
+                status, resp_headers, raw = _post_keepalive(
+                    "api.deepseek.com", "/chat/completions", data, headers, timeout=180)
+                if status == 200:
+                    payload = json.loads(raw.decode("utf-8", "replace"))
+                    _record_usage(usage, payload.get("usage"))
+                    content = payload["choices"][0]["message"]["content"]
+                    parsed = _parse_json_object(content)
+                    with _MODEL_LOCK:
+                        globals()["_ACTIVE_MODEL"] = (model, no_think)
+                    return parsed
+                snippet = raw.decode("utf-8", "replace")[:240]
+                if status in (401, 403):
+                    raise AuthError("DeepSeek authentication failed (HTTP %d): %s" % (status, snippet))
+                if status in (400, 404, 422):
+                    # Permanent model/parameter rejection: immediately try fallback model.
+                    last = RuntimeError("HTTP %d (%s): %s" % (status, model, snippet))
+                    break
+                # Transient rate limit or server error: respect Retry-After and back off.
+                last = RuntimeError("HTTP %d (%s): %s" % (status, model, snippet))
+                retry_after = None
+                for hk, hv in resp_headers.items():
+                    if hk.lower() == "retry-after":
+                        try:
+                            retry_after = float(hv)
+                        except ValueError:
+                            pass
+                time.sleep(retry_after if retry_after is not None else (1.2 * (2 ** attempt)))
+            except AuthError:
+                raise
+            except (http.client.HTTPException, OSError, KeyError, ValueError, TimeoutError) as exc:
                 last = exc
-                time.sleep(1.5 + attempt * 2)
+                time.sleep(1.0 + attempt * 1.5)
     raise RuntimeError("LLM call failed: %s" % last)
 
 
 TRANSLATE_SYSTEM = (
-    "You are a world-class subtitle translator for feature films. "
-    "Translate every numbered line into {target}. Rules: translate meaning and intent, "
-    "not words; dialogue must sound like spoken language, never prose; keep the register "
-    "and tone of the scene; use the glossary spelling for names; keep each line under "
-    "90 characters; never merge, split, drop, reorder or renumber lines; if a line is a "
-    "song lyric, translate it as a lyric; if a line is untranslatable noise, leave it "
-    "empty. Reply with JSON only: {{\"t\": {{\"<index>\": \"<translation>\"}}}}."
+    "Subtitle translator for films. Translate each keyed line into {target}. "
+    "Translate meaning into natural spoken dialogue (not prose); match scene tone; "
+    "use glossary names; max 90 chars/line; keep every key, never merge/split/drop; "
+    "translate lyrics as lyrics; leave pure noise empty. "
+    "JSON only: {{\"t\":{{\"<key>\":\"<translation>\"}}}}."
 )
 
+_VERBAL_RE = re.compile(r"[\w\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
-def translate_cues(cues, target, context=None, batch=36, llm=None):
-    """Translate display cues; returns dict index -> translated text."""
-    call = llm or llm_json
+
+def _is_nonverbal(text):
+    """True for pure punctuation/music symbols/whitespace that need no translation."""
+    s = (text or "").strip()
+    return not s or not _VERBAL_RE.search(s)
+
+
+def _build_translate_system(target, ctx):
+    """Place static film context in the system message to maximize prompt-prefix caching."""
     target_name = TARGET_NAMES.get(target, target)
-    system = TRANSLATE_SYSTEM.format(target=target_name)
+    parts = [TRANSLATE_SYSTEM.format(target=target_name)]
+    if ctx.get("title"):
+        parts.append("FILM: " + str(ctx["title"]))
+    if ctx.get("synopsis"):
+        parts.append("SYNOPSIS: " + str(ctx["synopsis"]))
+    if ctx.get("register"):
+        parts.append("REGISTER: " + str(ctx["register"]))
+    if ctx.get("glossary"):
+        items = sorted(ctx["glossary"].items())[:60]
+        parts.append("GLOSSARY: " + "; ".join("%s=%s" % (k, v) for k, v in items))
+    return "\n".join(parts)
+
+
+def translate_cues(cues, target, context=None, batch=60, llm=None, workers=1, usage=None):
+    """Translate display cues; returns dict index -> translated text.
+
+    Uses a deterministic system prefix (film/synopsis/glossary) for prompt caching,
+    compact key->text JSON input (~40% fewer tokens), skips non-verbal lines,
+    auto-halves on truncated JSON, and supports parallel workers for full-track jobs.
+    """
+    ctx = dict(context or {})
+    system = _build_translate_system(target, ctx)
     out = {}
-    ctx = context or {}
-    for start in range(0, len(cues), batch):
-        chunk = cues[start:start + batch]
-        lines = [{"i": c["i"], "text": c["src"]} for c in chunk]
+    verbal = []
+    for c in cues:
+        src = (c.get("src") or "").strip()
+        if _is_nonverbal(src):
+            if src:
+                out[c["i"]] = src
+        else:
+            verbal.append(c)
+    if not verbal:
+        return out
+
+    def call_model(sys_prompt, usr_prompt, max_tokens):
+        if llm is not None:
+            return llm(sys_prompt, usr_prompt, max_tokens=max_tokens)
+        return llm_json(sys_prompt, usr_prompt, max_tokens=max_tokens, usage=usage)
+
+    def translate_group(group, prev_text):
+        lines = {str(c["i"]): c["src"] for c in group}
         user_parts = []
-        if ctx.get("title"):
-            user_parts.append("FILM: " + ctx["title"])
-        if ctx.get("synopsis"):
-            user_parts.append("SYNOPSIS: " + ctx["synopsis"])
-        if ctx.get("glossary"):
-            gl = "; ".join("%s = %s" % (k, v) for k, v in list(ctx["glossary"].items())[:60])
-            user_parts.append("GLOSSARY: " + gl)
-        if ctx.get("previous"):
-            user_parts.append("PREVIOUS LINES (context, do not translate): " + ctx["previous"])
-        user_parts.append("LINES:\n" + json.dumps(lines, ensure_ascii=False))
-        res = call(system, "\n\n".join(user_parts), max_tokens=3000)
-        table = res.get("t") or {}
-        for c in chunk:
+        if prev_text:
+            user_parts.append("PREV (context only): " + prev_text)
+        user_parts.append("LINES:\n" + json.dumps(lines, ensure_ascii=False, separators=(",", ":")))
+        try:
+            res = call_model(system, "\n".join(user_parts), max_tokens=4096)
+        except AuthError:
+            raise
+        except (ValueError, RuntimeError):
+            if len(group) > 10:
+                half = len(group) // 2
+                left = translate_group(group[:half], prev_text)
+                mid_prev = " / ".join(c["src"] for c in group[max(0, half - 2):half])
+                right = translate_group(group[half:], mid_prev)
+                left.update(right)
+                return left
+            raise
+        table = res.get("t") if isinstance(res, dict) else None
+        if not isinstance(table, dict):
+            if len(group) > 10:
+                half = len(group) // 2
+                left = translate_group(group[:half], prev_text)
+                mid_prev = " / ".join(c["src"] for c in group[max(0, half - 2):half])
+                right = translate_group(group[half:], mid_prev)
+                left.update(right)
+                return left
+            table = {}
+        got = {}
+        for c in group:
             val = table.get(str(c["i"]))
             if val is None:
-                val = table.get(c["i"]) if isinstance(table, dict) else None
+                val = table.get(c["i"])
             if isinstance(val, str) and val.strip():
-                out[c["i"]] = val.strip()
-        ctx["previous"] = " / ".join(c["src"] for c in chunk[-2:])
+                got[c["i"]] = val.strip()
+        return got
+
+    # Precompute 2-line rolling context per batch so batches can safely run in parallel.
+    tasks = []
+    initial_prev = ctx.get("previous") or ""
+    for start in range(0, len(verbal), batch):
+        chunk = verbal[start:start + batch]
+        prev = initial_prev if start == 0 else " / ".join(
+            c["src"] for c in verbal[max(0, start - 2):start])
+        tasks.append((chunk, prev))
+
+    if workers > 1 and len(tasks) > 1:
+        with cf.ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
+            futs = [pool.submit(translate_group, chunk, prev) for chunk, prev in tasks]
+            for fut in futs:
+                out.update(fut.result())
+    else:
+        for chunk, prev in tasks:
+            out.update(translate_group(chunk, prev))
+
+    if context is not None:
+        context["previous"] = " / ".join(c["src"] for c in verbal[-2:])
     return out
 
 
-def analyze_film(cues, target, llm=None):
+def analyze_film(cues, target, llm=None, usage=None):
     """Whole-film pass: synopsis + glossary so the final translation is grounded."""
     if cues and isinstance(cues[0], str):
         transcript = "\n".join(cues)
@@ -800,7 +1141,10 @@ def analyze_film(cues, target, llm=None):
               "\"glossary\": {\"source name or term\": \"%s rendering\"}, "
               "\"register\": \"one line on tone\"}." % TARGET_NAMES.get(target, target))
     user = "FILM TRANSCRIPT:\n" + body
-    res = (llm or llm_json)(system, user, max_tokens=2000, temperature=0.1)
+    if llm is not None:
+        res = llm(system, user, max_tokens=2000, temperature=0.1)
+    else:
+        res = llm_json(system, user, max_tokens=2000, temperature=0.1, usage=usage)
     return {
         "synopsis": (res.get("synopsis") or "").strip(),
         "glossary": res.get("glossary") or {},

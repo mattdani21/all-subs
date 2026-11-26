@@ -1,164 +1,173 @@
 # All Subs
 
-**AI captions for any video.** It looks for existing subtitles first — usually in
-seconds — and only when nothing usable exists does it transcribe the audio locally with
-whisper.cpp and translate it with an LLM.
+**Subtitle recovery and AI captions for web video (macOS + Chrome).** It checks for usable
+existing subtitles first — YouTube tracks, site-native tracks, or public subtitle libraries —
+and only falls back to transcribing and translating when nothing usable exists.
 
 ![All Subs rendering a library subtitle track over Shadow (2018)](docs/hero.png)
 
 Built because a Chinese film on bilibili.tv had no subtitle track and I wanted to watch
 it that night.
 
-## It's a router
+## How routing actually works
 
-Every request walks four rungs, cheapest first, and only falls through when the rung
-above fails its gate:
+Every request checks existing subtitles first (cheapest and fastest). Only when no usable
+track exists — or when you click **Use AI instead** — does it run the generation mode you
+selected in the panel:
 
-| rung | what happens | measured |
+| route | when it runs | what happens | typical time & cost |
+|---|---|---|---|
+| **1. retrieve** | always first (unless *Use AI instead*) | YouTube track → site-native track → Wikidata + IMDb + Wyzie library, gated on runtime coverage | **~2–8 s**, free |
+| **2. This Mac (default AI)** | no usable track + **This Mac** selected | local `whisper.cpp` ASR on Apple Silicon + DeepSeek translation on compact cue text | **11–17 min** for 116 min · **~$0.02–0.04** (prefix-cached) |
+| **3. Cloud (opt-in)** | no usable track + **Cloud** selected | 32 kbps MP3 chunks → multimodal model (OpenRouter/Gemini Flash); fails over to local whisper on error | **~4.9 s / 60 s clip** · **~$0.30/film** |
+| **4. Offline (experimental)** | **This Mac** + *Translate offline* checked (16 GB+ RAM) | `whisper.cpp` + local Qwen3-4B via `llama.cpp` | slower, free, 100% offline |
+
+The gates matter as much as the models: a retrieved library track must plausibly span the
+film (70–105% of runtime — my first lookup returned a different film's subtitles ending 22
+minutes after the credits), silent chunks skip Whisper entirely, a music/speech-rate gate
+rejects whisper hallucinations over background music, and the overlay badge always tells you
+which route answered (*YouTube subs*, *official subs*, *library subs*, *cloud subs*, or *AI subs*).
+
+## What leaves your machine
+
+Nothing runs on an All Subs server — there is no hosted backend. What leaves your Mac
+depends strictly on the route used:
+
+| route | leaves your Mac | stays local |
 |---|---|---|
-| **1. retrieve** | existing track via Wikidata → IMDb → Wyzie | **~8 s**, 1,072 cues |
-| **2. cloud** | audio chunk → one multimodal call → translated cues | 4.9 s per 60 s clip, ~$0.30/film |
-| **3. local ASR** | whisper.cpp + DeepSeek on the cue text | 11–17 min for 116 min |
-| **4. fully local** | whisper.cpp + Qwen3-4B, nothing leaves the machine | fine on 16 GB+, slow on 8 GB |
+| **YouTube / site-native track** | nothing (or cue text to DeepSeek only if translating to another language) | audio, video |
+| **Subtitle library (Wyzie)** | cleaned title + year to Wikidata; IMDb ID + target language to Wyzie | audio, video |
+| **This Mac (local ASR)** | cue text only to DeepSeek (`api.deepseek.com`) | audio, video, Whisper model |
+| **Cloud mode (opt-in)** | compressed 32 kbps mono audio chunks to OpenRouter (`openrouter.ai`) | video |
+| **Offline mode (experimental)** | nothing | everything |
 
-The gates are the product: a retrieved track must span the film (my first one ran 22
-minutes past the credits), cloud needs credit and tolerable timestamps, local ASR needs a
-translation key, fully-local needs RAM. The overlay badge tells you which rung answered —
-*library subs*, *cloud subs*, *AI subs*, or *official*.
-
-## How it works
+## Architecture
 
 ```
-Chrome extension  ──►  local engine (127.0.0.1:8765)
-  finds <video>          1. probe: title, duration, subtitle inventory
-  draws overlay          2. library lookup: title+year → IMDb → Wyzie → sync gate
-  polls cues             3. nothing usable → download audio → 16 kHz mono → whisper.cpp
-                         4. chunked ASR (60s/120s/300s) → cues stream as they land
-                         5. LLM translates while the next chunk transcribes
-                         6. optional deep pass: whole transcript → synopsis + glossary
-                            → every cue re-translated with that context
+Chrome extension (zero-idle-CPU overlay) ──► local engine (127.0.0.1:8765)
+  MutationObserver + ResizeObserver            1. YouTube track / page probe (yt-dlp)
+  requestVideoFrameCallback while playing      2. library lookup: title+year → Wikidata → Wyzie → coverage gate
+  gzipped cue pages                            3. lazy pipelined chunking (30s/90s/180s/300s) + silent-chunk skip
+                                               4. whisper.cpp + fast onset snapping + music/loop filter
+                                               5. prefix-cached compact batch translation (keep-alive HTTPS)
+                                               6. optional deep pass: synopsis + glossary + register → parallel refine
 ```
 
 ![pipeline](docs/allsubs-pipeline.png)
-
-Everything heavy runs on your machine. On the local path only cue text goes to the
-translation API; the cloud rung uploads audio, which is why it is a choice rather than a
-default. Jobs are
-cached by URL + language, so a second viewing is instant.
 
 ## Quick start (macOS)
 
 ```bash
 git clone https://github.com/mattdani21/all-subs.git
 cd all-subs
-./allsubs setup     # ffmpeg, whisper-cpp, yt-dlp + the 1.5 GB speech model
-./allsubs start     # engine on 127.0.0.1:8765
+./allsubs setup            # installs ffmpeg, yt-dlp, whisper-cpp + 1.5 GB speech model
+./allsubs start            # starts local engine on 127.0.0.1:8765
 ```
 
-Chrome → `chrome://extensions` → Developer mode → **Load unpacked** → `extension/`.
-Open a video and hit **AS** (or `Alt+Shift+A`).
+> **Retrieval-first / Cloud-only fast install:** run `./allsubs setup --lite` to skip the
+> 1.5 GB Whisper download until you actually need local transcription (`./allsubs model`
+> pulls it later).
 
-Add keys in the extension's **Settings** page, or drop them in `~/AllSubs/.env`:
+Load the Chrome extension once:
 
-- `DEEPSEEK_API_KEY` — translation (required for the generate path)
-- `WYZIE_API_KEY` — subtitle library (optional, free at store.wyzie.io/redeem, 1,000/day)
+1. Open `chrome://extensions` → enable **Developer mode**
+2. Click **Load unpacked** → select `extension/`
+3. Open a video page and click **AS** (or press `Alt+Shift+A`)
 
-`./allsubs doctor` reports exactly what is missing.
+Add API keys in the extension's **Settings** page (stored locally at `~/.allsubs/config.json`
+with `0600` permissions) or in `.env` (see `.env.example`):
 
-## Speed, measured
+- `DEEPSEEK_API_KEY` — translation on the local ASR path
+- `WYZIE_API_KEY` — optional, free at `store.wyzie.io/redeem` (1,000 lookups/day) for subtitle library retrieval
+- `OPENROUTER_API_KEY` — optional, enables opt-in **Cloud** mode
 
-116-minute film on an M3 (8 GB):
+Run `./allsubs doctor` at any time to verify binaries, model, keys, and engine status.
 
-| what | time |
-|---|---|
-| library track, after the panel warms | **0.01 s** |
-| library track, cold | ~8 s |
-| first caption, opening has dialogue | ~20 s |
-| first caption, opening is music/rain | ~80 s |
-| full ASR + translation | 11–17 min |
-| repeat view | instant (cached) |
+## Tested compatibility
 
-The panel starts resolving the title, checking libraries and fetching the opening two
-minutes as soon as it opens, so by the time you press *Caption this video* most of the
-latency is already spent. Chunks are 30 s / 90 s / 180 s / 300 s, so the first lines land
-long before the film is finished.
+| site / source | retrieval | AI generation | notes |
+|---|---|---|---|
+| **bilibili.tv** | library (Wyzie) | verified (116-min film) | primary test target |
+| **YouTube** | native & auto captions (~2 s) | best-effort (`yt-dlp` may hit bot check) | cookies are opt-in: `ALLSUBS_YOUTUBE_COOKIES=1` |
+| **Direct MP4 / HLS (`.m3u8`)** | site track / library | supported | extension sniffs stream URL in top & iframe players |
+| **Local video files** | — | via `test/player.html` | useful for offline testing |
+| **DRM (Netflix, Prime, Disney+)** | not supported | not supported | encrypted streams are out of scope |
 
-ASR is the floor: whisper large-v3-turbo runs ~7–13× realtime and accounts for 94–97% of
-wall time. Greedy decoding, quantised models, flash attention and parallel chunks were all
-measured — none move it much. The only real win is not transcribing, which is why the
-library path exists.
+## Speed, efficiency & cost
 
-## Sites
+Measured on a 116-minute film (M3 MacBook Air, 8 GB RAM):
 
-- **YouTube** — native and auto captions are read directly, no audio download, ~2 s.
-  Videos with no track fall through to the normal generate path.
-- **Plain MP4 / HLS players** — the extension sniffs the media URL from the page
-  (`video.currentSrc` plus resource-timing entries ending in `.m3u8` / `.mp4`) and the
-  engine pulls that stream directly with yt-dlp. Content scripts run in all frames, so
-  players inside a same-site iframe work too. This is the generic path most streaming
-  mirrors use.
-- **YouTube without captions** falls back to yt-dlp, which YouTube often refuses. Reading
-  Chrome's cookies (`--cookies-from-browser`) can fix that but triggers a macOS keychain
-  prompt, so it is opt-in: start the engine with `ALLSUBS_YOUTUBE_COOKIES=1`.
-- **DRM** (Netflix, Prime Video, Disney+) — not supported. The stream is encrypted, so
-  there is nothing to transcribe.
-- Mirror sites rotate domains constantly; support is per-stream, not per-domain, which is
-  why it works without a site adapter.
+| path | time | notes |
+|---|---|---|
+| library track (after panel prefetch) | **~0.01 s** | prefetched while the panel is open |
+| library track (cold) | **~8 s** | Wikidata → Wyzie → coverage gate |
+| YouTube native captions | **~2 s** | no audio download |
+| first AI caption (dialogue opening) | **~20 s** | 30 s opening chunk via section download |
+| full local ASR + translation | **11–17 min** | Whisper Metal is ~94% of wall time |
+| repeat view | **instant** | cached by URL + target in `~/.allsubs/cache` |
 
-## What it is not
-
-- Not a hosted service. There is no server; the engine runs on your Mac.
-- Not DRM-capable. It captions video you can already fetch, not Netflix.
-- Not silent about failure: the panel distinguishes engine offline, missing model,
-  missing key, and rejected subtitle tracks.
-
-## Limits
-
-- macOS-first. Engine is stdlib Python + brew binaries; Linux should work, Windows has no
-  install path yet.
-- `yt-dlp` is refused by YouTube's bot check; bilibili and direct video hosts work.
-- Overlay can't attach to a bare `<video>` in fullscreen — only container fullscreen.
-- Library subtitles occasionally come from a different release; the duration gate catches
-  the obvious mismatches, not every offset. Use `Check sync` for same-language tracks, or
-  the ±0.1 s nudge otherwise.
-- Alpha quality: unsigned, no auto-update.
+Efficiency details in v0.4.0:
+- **Cheaper translation:** static film context (title, synopsis, register, sorted glossary) lives in the system prompt for DeepSeek prefix caching; cues use compact key→text JSON (~40% fewer input tokens), larger batches (60 lines) with auto-halving recovery, non-verbal line skipping, keep-alive HTTPS, and fail-fast 4xx model fallback.
+- **Faster audio pipeline:** lazy pipelined chunk slicing, silent-chunk skipping before Whisper, 2-window early-exit language detection, C-speed cue-window onset snapping, and automatic cleanup of temporary chunk WAVs.
+- **Zero idle browser CPU:** the overlay uses `ResizeObserver` + `requestVideoFrameCallback` only while playing with cues loaded (0 rAF frames when idle or paused), and content script video discovery is event-driven via `MutationObserver`.
 
 ## Controls
 
 - `Alt+Shift+A` — open/close the panel
-- Bilingual — original line above the translation
-- `−0.1s` / `+0.1s` — timing nudge; the correction is saved per site
-- Re-sync — refetch cues (after the deep pass rewrites them)
-- Check sync — re-listens to three 30-second samples and shifts the track if it is out
+- **Bilingual** — show the original line above the translation
+- `−0.1s` / `+0.1s` / `0s` — nudge or reset subtitle timing (saved per site)
+- **Check sync** — listens to three 30 s audio samples with strict one-to-one cue matching (±30 s window) and shifts same-language tracks only when genuinely out of sync
+- **Use AI instead** — bypass a retrieved track for the current video without changing your global defaults
+- **Re-sync** — refetch cues from the engine
 
-## API (engine)
+## CLI & release artefacts
+
+```bash
+./allsubs setup [--lite]   # install dependencies (and optionally skip the 1.5 GB model)
+./allsubs model            # download the whisper large-v3-turbo model on demand
+./allsubs doctor           # verify python, ffmpeg, whisper-cli, yt-dlp, model, keys, engine
+./allsubs start|stop|status|logs
+./allsubs test             # compile check + unit test suite
+./allsubs clean            # remove stale temporary job workdirs and show cache size
+./allsubs package          # build dist/AllSubs-<ver>.zip, dist/AllSubs-extension-<ver>.zip, SHA256SUMS.txt
+```
+
+`./allsubs package` produces three clean release artefacts in `dist/`:
+1. `AllSubs-<ver>.zip` — curated source release (engine, extension with icons, CLI, tests, license; no internal dev notes or secrets).
+2. `AllSubs-extension-<ver>.zip` — standalone Chrome Web Store package (`extension/` contents at zip root).
+3. `SHA256SUMS.txt` — SHA-256 checksums for release verification.
+
+## API (local engine)
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | engine, model, keys, RAM |
-| GET/POST | `/api/config` | read setup state / store keys (written 0600) |
-| POST | `/api/jobs` | `{url, target, mode, duration}` |
-| GET | `/api/jobs/{id}` | status, stage, progress |
-| GET | `/api/jobs/{id}/cues?from=N` | `{i,s,e,x,t}` |
-| POST | `/api/jobs/{id}/refine` | re-run the whole-film pass only |
-| POST | `/api/jobs/{id}/align` | content-matched timing check; shifts cues if genuinely out |
-| GET | `/api/jobs/{id}.vtt` | WebVTT export |
+| `GET` | `/health` | engine version, binaries, model, key presence, RAM |
+| `GET`/`POST` | `/api/config` | read setup state / save API keys (`0600`) |
+| `POST` | `/api/jobs` | `{url, target, mode, duration, asr, translator, force}` |
+| `GET` | `/api/jobs/{id}` | status, stage, progress, track provenance, token/cost usage |
+| `GET` | `/api/jobs/{id}/cues?from=N` | paginated cues `{i,s,e,x,t}` (gzip-compressed) |
+| `POST` | `/api/jobs/{id}/refine` | run the whole-film synopsis/glossary pass |
+| `POST` | `/api/jobs/{id}/align` | one-to-one content-matched sync check |
+| `GET` | `/api/jobs/{id}.vtt` | WebVTT export |
 
-## Offline mode (experimental)
+## Known limits
 
-`./allsubs local-model` pulls Qwen3-4B (~2.5 GB) and the panel gains an offline toggle.
-Whisper runs first, then llama-server, so the two never share RAM. Fits 16 GB+; on an
-8 GB machine it is CPU-only and impractically slow. Cloud translation stays the default.
+- macOS-first (Apple Silicon Metal for `whisper.cpp`). Linux should work; Windows has no install path yet.
+- Overlay cannot attach to a bare `<video>` element in fullscreen (only container fullscreen).
+- Library subtitles occasionally come from a different cut; use **Check sync**, `±0.1s`, or **Use AI instead**.
+- Alpha quality: unsigned local engine, unpacked extension (Chrome Web Store listing prepared in `CHROMEWEBSTORE.md`).
 
 ## Layout
 
 ```
-engine/captions.py    probe, native subs, audio, whisper, translation
-engine/providers.py   Wikidata → Wyzie resolution + sync gate
-engine/server.py      HTTP API, job runner, cache
-engine/local_llm.py   offline translation via llama.cpp
-extension/            MV3: overlay.js, content.js, options, popup
-test/                 unit tests, local harness, Playwright e2e
+allsubs                CLI: setup, model, doctor, start/stop, test, clean, package
+engine/captions.py     probe, native/YouTube subs, audio, whisper, sync, prefix-cached LLM
+engine/providers.py    Wikidata → IMDb → Wyzie resolver + coverage gate
+engine/cloud_asr.py    opt-in multimodal cloud chunk captioning (32 kbps MP3, retries)
+engine/local_llm.py    experimental offline translation via llama.cpp
+engine/server.py       stdlib ThreadingHTTPServer API, gzip, job runner, cache
+extension/             MV3 Chrome extension: icons, overlay.js, content.js, options, popup
+test/                  unit tests, local player harness, Playwright e2e scripts
 ```
 
 ## Licence

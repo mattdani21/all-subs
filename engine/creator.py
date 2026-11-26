@@ -6,10 +6,12 @@ grading its own output is not a quality gate.
 import json
 import os
 import re
+import shutil
 import sys
+import time
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import captions  # noqa: E402
 
 REVIEWER_MODEL = os.environ.get("ALLSUBS_REVIEWER", "deepseek-v4-pro")
@@ -19,41 +21,77 @@ MIN_DUR = 1.0
 MAX_DUR = 7.0
 
 
-def _api(payload, timeout=180):
+def _api(payload, timeout=180, retries=3):
     key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
-    req = urllib.request.Request(
-        "https://api.deepseek.com/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+    raw_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    headers = {
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+    }
+    last = None
+    for attempt in range(retries):
+        try:
+            status, _hdrs, raw = captions._post_keepalive(
+                "api.deepseek.com", "/chat/completions", raw_body, headers, timeout=timeout)
+            if status == 200:
+                return json.loads(raw.decode("utf-8", "replace"))
+            snippet = raw.decode("utf-8", "replace")[:200]
+            if status in (400, 401, 403, 404):
+                raise RuntimeError("DeepSeek HTTP %d: %s" % (status, snippet))
+            last = RuntimeError("DeepSeek HTTP %d: %s" % (status, snippet))
+            time.sleep(1.5 * (2 ** attempt))
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            last = exc
+            time.sleep(1.5 * (2 ** attempt))
+    raise RuntimeError("reviewer API failed: %s" % last)
 
 
 def transcribe(media, lang="auto", limit=None):
     workdir = os.path.join(captions.JOBS_DIR, "creator_" + str(os.getpid()))
     os.makedirs(workdir, exist_ok=True)
-    total = captions.duration_of(media)
-    if limit:
-        total = min(total, float(limit))
-    chunks = captions.split_wav(media, workdir, limit=limit, schedule=[300])
-    segs = []
-    detected = lang
-    for i, (path, offset, length) in enumerate(chunks):
-        part, lg = captions.transcribe_chunk(path, os.path.join(workdir, "c%03d" % i), lang)
-        detected = lg or detected
-        silences = captions.silence_intervals(path)
-        part = captions.filter_segments(part, silences, detected)
-        for c in part:
-            c["start"] = round(c["start"] + offset, 3)
-            c["end"] = round(c["end"] + offset, 3)
-        segs.extend(part)
-    return captions.split_display(segs), detected, total
+    try:
+        total = captions.duration_of(media)
+        if limit:
+            total = min(total, float(limit))
+        plan = captions.plan_chunks(total, limit=limit, schedule=[300])
+        segs = []
+        detected = lang
+        for i, offset, length in plan:
+            path = captions.cut_chunk(media, workdir, i, offset, length)
+            silences = captions.silence_intervals(path)
+            if captions.is_mostly_silent(silences, length):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                continue
+            base = os.path.join(workdir, "c%03d" % i)
+            part, lg = captions.transcribe_chunk(path, base, lang)
+            detected = lg or detected
+            part = captions.filter_segments(part, silences, detected)
+            part = captions.snap_to_onsets(part, path)
+            for c in part:
+                c["start"] = round(c["start"] + offset, 3)
+                c["end"] = round(c["end"] + offset, 3)
+            segs.extend(part)
+            for p in (path, base + ".json"):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+        return captions.split_display(segs), detected, total
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def translate(cues, target="en", title=""):
-    out = captions.translate_cues(cues, target, {"title": title})
+    out = captions.translate_cues(cues, target, {"title": title}, workers=4)
     for c in cues:
         c["dst"] = out.get(c["i"], "")
     return cues

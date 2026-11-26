@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>All Subs — AI captions for any video</title>
-<meta name="description" content="A Chrome extension + local engine that finds existing subtitles first, and only transcribes and translates when nothing usable exists.">
+<title>All Subs — Subtitle recovery &amp; AI captions for web video</title>
+<meta name="description" content="A Chrome extension + local macOS engine that recovers existing subtitles first, and only transcribes and translates when nothing usable exists.">
 <style>
   :root {
+    color-scheme: dark;
     --bg: #0b0c0f;
     --panel: #12141a;
     --line: #232733;
@@ -31,7 +32,7 @@
     color: var(--accent); margin-bottom: 18px;
   }
   h1 { font-size: 44px; line-height: 1.1; margin: 0 0 18px; letter-spacing: -.02em; }
-  .sub { font-size: 19px; color: var(--dim); max-width: 660px; margin: 0 0 28px; }
+  .sub { font-size: 19px; color: var(--dim); max-width: 680px; margin: 0 0 28px; }
   .install {
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
     font: 13px/1.5 var(--mono); color: var(--dim);
@@ -40,20 +41,29 @@
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
     padding: 10px 12px; color: var(--text);
   }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 22px; }
   .btn {
     display: inline-block; background: var(--accent); color: #14100a; font-weight: 600;
-    padding: 11px 18px; border-radius: 6px; margin-top: 22px;
+    padding: 11px 18px; border-radius: 6px;
+  }
+  .btn.ghost {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
   }
   .btn:hover { text-decoration: none; filter: brightness(1.06); }
   figure { margin: 40px 0 0; }
   figure img { width: 100%; border-radius: 10px; border: 1px solid var(--line); display: block; }
   figcaption, .note { font-size: 13px; color: var(--dim); margin-top: 10px; }
   .note { max-width: 760px; line-height: 1.65; }
-  .note code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
-               padding: 1px 5px; font-family: var(--mono); font-size: 12px; }
+  .note code, li code {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 5px; font-family: var(--mono); font-size: 12px;
+  }
   section { padding: 52px 0; border-bottom: 1px solid var(--line); }
-  h2 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
-       font-family: var(--mono); font-weight: 600; margin: 0 0 24px; }
+  h2 {
+    font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
+    font-family: var(--mono); font-weight: 600; margin: 0 0 24px;
+  }
+  .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
   th, td { text-align: left; padding: 14px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font: 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
@@ -74,93 +84,136 @@
 <div class="wrap">
 
   <header>
-    <div class="kicker">Chrome extension + local engine · MIT</div>
+    <div class="kicker">Chrome extension + local macOS engine · v0.4.0 · MIT</div>
     <h1>Captions for the video nobody subtitled.</h1>
     <p class="sub">
-      All Subs walks a four-rung cascade, cheapest first: an existing subtitle track first
-      (usually under 10 seconds), then a cloud multimodal pass, then whisper.cpp on your
-      Mac, and finally a fully local model. A gate at each rung decides whether that
-      answer can be trusted before the next one is tried.
+      All Subs checks existing subtitles first — YouTube tracks, site-native tracks, or public
+      subtitle libraries gated on runtime coverage — and only falls back to AI transcription and
+      translation when nothing usable exists.
     </p>
     <div class="install">
       <code>git clone https://github.com/mattdani21/all-subs</code>
       <code>cd all-subs &amp;&amp; ./allsubs setup</code>
       <code>./allsubs start</code>
     </div>
-    <a class="btn" href="https://github.com/mattdani21/all-subs">Get it on GitHub</a>
+    <p class="note">
+      Want retrieval or cloud mode without the 1.5 GB speech model? Run <code>./allsubs setup --lite</code>
+      and pull the model later with <code>./allsubs model</code>.
+    </p>
+    <div class="actions">
+      <a class="btn" href="https://github.com/mattdani21/all-subs">Get it on GitHub</a>
+      <a class="btn ghost" href="https://github.com/mattdani21/all-subs/releases">Download release ZIP</a>
+    </div>
 
     <figure>
-      <img src="hero.png" alt="All Subs overlay rendering subtitle cues over a paused film">
-      <figcaption>A retrieved subtitle track over <em>Shadow</em> (2018) — the film that started this.</figcaption>
+      <img src="hero.png" width="1200" height="499" alt="All Subs overlay rendering subtitle cues over a paused film">
+      <figcaption>A retrieved library subtitle track over <em>Shadow</em> (2018) — the film that started this.</figcaption>
     </figure>
 
     <p class="note">
-      The browser only draws the overlay. The extension sends the page URL, the
-      <code>&lt;video&gt;</code> source and the playhead to <code>127.0.0.1:8765</code>; the engine fetches
-      the audio with yt-dlp/ffmpeg, returns cues, and the overlay renders them against
-      <code>video.currentTime</code>.
+      The browser stays idle until you caption a video. The extension sends the page URL and stream
+      source to <code>127.0.0.1:8765</code>; the local engine recovers or generates cues and the
+      shadow-DOM overlay syncs them to <code>video.currentTime</code> with zero background polling.
     </p>
   </header>
 
   <section>
-    <h2>The routing table <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim);font-family:inherit">— measured on a 116-minute film, M3 / 8 GB</span></h2>
-    <table>
-      <thead>
-        <tr><th>Rung</th><th>What happens</th><th>Measured</th></tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>1 · retrieve</td>
-          <td>Existing track via Wikidata → IMDb → subtitle library, gated on runtime coverage and a
-              three-window sync check.</td>
-          <td class="num">~8 s · 1,072 cues</td>
-        </tr>
-        <tr>
-          <td>2 · cloud</td>
-          <td>Each 60 s of audio goes to one multimodal call that returns timestamped, translated
-              cues; a failed call hands the rest to rung 3.</td>
-          <td class="num">4.9 s per 60 s · ~$0.30 per film</td>
-        </tr>
-        <tr>
-          <td>3 · local ASR</td>
-          <td>whisper.cpp on the Mac; only cue text goes to the LLM. Cues stream as chunks land.</td>
-          <td class="num">11–17 min per 116 min · ~$0.05 translation</td>
-        </tr>
-        <tr>
-          <td>4 · fully local</td>
-          <td>whisper.cpp plus a 4B model on the laptop. Nothing leaves the machine.</td>
-          <td class="num">unmeasured end-to-end · needs 16 GB+</td>
-        </tr>
-      </tbody>
-    </table>
+    <h2>How routes work <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim);font-family:inherit">— measured on a 116-minute film, M3 / 8 GB</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Route</th><th>When it runs</th><th>Measured</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1 · retrieve</td>
+            <td>Always tried first (unless you click <em>Use AI instead</em>): YouTube captions, site tracks, or Wikidata → IMDb → Wyzie library gated on runtime coverage.</td>
+            <td class="num">2–8 s · free</td>
+          </tr>
+          <tr>
+            <td>2 · This Mac</td>
+            <td>Default AI mode: <code>whisper.cpp</code> on Apple Silicon; compact prefix-cached cue text goes to DeepSeek. Silent chunks skip Whisper automatically.</td>
+            <td class="num">11–17 min · ~$0.02–0.04</td>
+          </tr>
+          <tr>
+            <td>3 · Cloud</td>
+            <td>Opt-in mode: 32 kbps mono MP3 chunks sent to a multimodal model (OpenRouter/Gemini Flash). Fails over to local Whisper on error.</td>
+            <td class="num">4.9 s / 60 s · ~$0.30/film</td>
+          </tr>
+          <tr>
+            <td>4 · Offline</td>
+            <td>Experimental opt-in (16 GB+ RAM): <code>whisper.cpp</code> plus local Qwen3-4B via <code>llama.cpp</code>. Nothing leaves the machine.</td>
+            <td class="num">100% local · 16 GB+</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="privacy">
+    <h2>What leaves your machine</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Route</th><th>Sent off-device</th><th>Stays on your Mac</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>YouTube / native</td>
+            <td>Nothing (cue text to DeepSeek only if translating languages)</td>
+            <td>Audio &amp; video</td>
+          </tr>
+          <tr>
+            <td>Library (Wyzie)</td>
+            <td>Cleaned title + year to Wikidata; IMDb ID to Wyzie</td>
+            <td>Audio &amp; video</td>
+          </tr>
+          <tr>
+            <td>This Mac (AI)</td>
+            <td>Cue text only to DeepSeek (<code>api.deepseek.com</code>)</td>
+            <td>Audio, video &amp; Whisper model</td>
+          </tr>
+          <tr>
+            <td>Cloud (opt-in)</td>
+            <td>32 kbps mono audio chunks to OpenRouter (<code>openrouter.ai</code>)</td>
+            <td>Video</td>
+          </tr>
+          <tr>
+            <td>Offline (exp.)</td>
+            <td>Nothing</td>
+            <td>Everything</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <section>
     <h2>Why the gates exist</h2>
     <div class="cols">
       <ul>
-        <li>The first retrieved track was a heist film's subtitles on a 116-minute movie — the last line landed 22 minutes after the credits. The coverage gate exists because of that.</li>
-        <li>A cloud call returning 402 mid-job falls through to local whisper instead of failing the job.</li>
+        <li>The first retrieved track was a heist film's subtitles on a 116-minute movie — the last line landed 22 minutes after the credits. The 70–105% runtime gate exists because of that.</li>
+        <li>A cloud call returning 402 mid-job falls through to local Whisper instead of dying; silent chunks skip Whisper entirely.</li>
       </ul>
       <ul>
-        <li>Check sync re-listens to three 30-second samples and shifts a track only when the recognised lines say it is genuinely out.</li>
-        <li>Offsets persist per site, so a correction is made once.</li>
+        <li><strong>Check sync</strong> re-listens to three 30-second samples using strict one-to-one cue matching (±30 s window) and shifts a track only when genuinely out.</li>
+        <li>Manual offsets persist per site with one-click reset, and <strong>Use AI instead</strong> overrides any retrieved track for that video.</li>
       </ul>
     </div>
   </section>
 
   <section>
-    <h2>What it is not</h2>
+    <h2>Tested scope &amp; limits</h2>
     <div class="cols">
       <ul>
-        <li>Not real-time. A film is processed once, then served from cache.</li>
-        <li>Not DRM. Netflix and Prime are out of scope.</li>
-        <li>Not "any site" — plain MP4/HLS and sites yt-dlp supports.</li>
+        <li><strong>Tested on:</strong> bilibili.tv, YouTube (native captions), direct MP4/HLS players, and the local HTML5 test harness.</li>
+        <li><strong>Not real-time:</strong> a film is processed once, then served instantly from local cache.</li>
+        <li><strong>Not DRM:</strong> Netflix, Prime Video, and Disney+ are out of scope.</li>
       </ul>
       <ul>
-        <li>Not a hosted service. The engine runs on your machine at <code>127.0.0.1:8765</code>.</li>
-        <li>Not signed, not notarised, no auto-update. Alpha.</li>
-        <li>macOS first; Linux should work, Windows untested.</li>
+        <li><strong>Not a hosted service:</strong> the engine runs locally at <code>127.0.0.1:8765</code>.</li>
+        <li><strong>macOS-first:</strong> Apple Silicon Metal for <code>whisper.cpp</code>; Linux should work, Windows untested.</li>
+        <li><strong>Alpha:</strong> unsigned local engine, unpacked Chrome extension.</li>
       </ul>
     </div>
   </section>
@@ -168,7 +221,11 @@
   <footer>
     <div class="row">
       <span>MIT · built by <a href="https://github.com/mattdani21">Matt</a></span>
-      <span><a href="https://github.com/mattdani21/all-subs">Source</a> · <a href="https://github.com/mattdani21/all-subs#readme">Docs</a></span>
+      <span>
+        <a href="https://github.com/mattdani21/all-subs">Source</a> ·
+        <a href="https://github.com/mattdani21/all-subs/releases">Releases</a> ·
+        <a href="https://github.com/mattdani21/all-subs#readme">Docs</a>
+      </span>
     </div>
   </footer>
 

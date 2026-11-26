@@ -1,28 +1,30 @@
 const dot = document.getElementById('dot');
 const statusEl = document.getElementById('status');
 
-chrome.storage.sync.get({ backend: 'http://127.0.0.1:8765' }, function (cfg) {
-  fetch(cfg.backend + '/health', { cache: 'no-store' })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      dot.classList.add(d.ok ? 'ok' : 'err');
-      statusEl.textContent = d.ok
-        ? 'Engine online · ' + d.jobs + ' job' + (d.jobs === 1 ? '' : 's')
-        : 'Engine offline';
-    })
-    .catch(function () {
-      dot.classList.add('err');
-      statusEl.textContent = 'Engine offline — run ./allsubs start';
-    });
-});
+(async () => {
+  try {
+    const cfg = await chrome.storage.sync.get({ backend: 'http://127.0.0.1:8765' });
+    const base = (cfg.backend || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+    const res = await fetch(base + '/health', { cache: 'no-store' });
+    const d = await res.json();
+    dot.classList.add(d.ok ? 'ok' : 'err');
+    statusEl.textContent = d.ok
+      ? `Engine online · v${d.version || '?'} · ${d.jobs} job${d.jobs === 1 ? '' : 's'}`
+      : 'Engine offline';
+  } catch {
+    dot.classList.add('err');
+    statusEl.textContent = 'Engine offline — run ./allsubs start';
+  }
+})();
 
-document.getElementById('open').addEventListener('click', function () {
-  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-    if (tabs && tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, { type: 'allsubs:open' }, function () {
-        void chrome.runtime.lastError;
-      });
+document.getElementById('open').addEventListener('click', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab && tab.id) {
+      await chrome.tabs.sendMessage(tab.id, { type: 'allsubs:open' });
     }
-    window.close();
-  });
+  } catch {
+    // Ignore restricted tabs where content scripts cannot run.
+  }
+  window.close();
 });

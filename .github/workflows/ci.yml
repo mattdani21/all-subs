@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile engine modules & run unit tests
+        run: ./allsubs test
+
+      - name: Validate manifest, icons, and release artefacts
+        run: |
+          ./allsubs package
+          python3 - <<'PY'
+          import json, os, struct, zipfile
+
+          with open("extension/manifest.json") as fh:
+              m = json.load(fh)
+          assert m["manifest_version"] == 3
+          assert len(m["description"]) <= 132, "manifest description exceeds 132 chars"
+          ver = m["version"]
+
+          # Verify every declared icon exists with exact PNG dimensions
+          for size_str, rel in m.get("icons", {}).items():
+              path = os.path.join("extension", rel)
+              assert os.path.isfile(path), f"missing icon {path}"
+              with open(path, "rb") as f:
+                  head = f.read(24)
+              assert head[:8] == b"\x89PNG\r\n\x1a\n"
+              w, h = struct.unpack(">II", head[16:24])
+              want = int(size_str)
+              assert (w, h) == (want, want), f"{rel}: got {w}x{h}, want {want}x{want}"
+
+          # Verify both release zips are clean and exclude secrets / dev junk
+          src_zip = f"dist/AllSubs-{ver}.zip"
+          ext_zip = f"dist/AllSubs-extension-{ver}.zip"
+          for zp in (src_zip, ext_zip):
+              assert os.path.isfile(zp), f"missing {zp}"
+              with zipfile.ZipFile(zp) as zf:
+                  names = zf.namelist()
+                  for bad in (".env", ".DS_Store", "CHROMEWEBSTORE.md", "review-pack.md", "review-prompt.md"):
+                      assert not any(bad in n for n in names), f"leaked {bad} in {zp}"
+          with zipfile.ZipFile(ext_zip) as zf:
+              assert "manifest.json" in zf.namelist()
+              assert "icons/icon-128.png" in zf.namelist()
+          print("All release artefact checks passed for v" + ver)
+          PY

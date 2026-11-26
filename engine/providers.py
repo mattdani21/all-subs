@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -17,9 +19,12 @@ import captions
 
 WYZIE_DOWNLOAD = "https://sub.wyzie.io/download"
 WIKIDATA = "https://query.wikidata.org/sparql"
-UA = "AllSubs/0.1 (local subtitle resolver)"
+UA = "AllSubs/%s (local subtitle resolver)" % captions.VERSION
 
 AD_PATTERNS = ("wyzie", "free plan", "sub.wyzie.io")
+_IMDB_CACHE = {}
+_IMDB_LOCK = threading.Lock()
+_IMDB_TTL = 3600
 
 
 def clean_title(raw):
@@ -39,6 +44,12 @@ def clean_title(raw):
 def wikidata_imdb(title, year, timeout=20):
     if not title:
         return None
+    cache_key = (title.lower(), year)
+    now = time.time()
+    with _IMDB_LOCK:
+        hit = _IMDB_CACHE.get(cache_key)
+        if hit and now - hit[0] < _IMDB_TTL:
+            return hit[1]
     label = json.dumps(title)
     year_filter = ""
     if year:
@@ -56,7 +67,12 @@ def wikidata_imdb(title, year, timeout=20):
     except Exception:
         return None
     rows = data.get("results", {}).get("bindings") or []
-    return rows[0]["imdb"]["value"] if rows else None
+    imdb = rows[0]["imdb"]["value"] if rows else None
+    with _IMDB_LOCK:
+        if len(_IMDB_CACHE) > 256:
+            _IMDB_CACHE.clear()
+        _IMDB_CACHE[cache_key] = (now, imdb)
+    return imdb
 
 
 def _key():

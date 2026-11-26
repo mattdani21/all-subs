@@ -58,20 +58,24 @@
       <div class="check"><span class="dot" data-k="ytdlp"></span> yt-dlp</div>
       <div class="check"><span class="dot" data-k="deepseek_key"></span> translation key</div>
       <div class="check"><span class="dot" data-k="wyzie_key"></span> subtitle library key</div>
+      <div class="check"><span class="dot" data-k="cloud_key"></span> cloud captioning key</div>
     </div>
     <div class="status" id="status"></div>
   </section>
 
   <section>
     <h2>Keys</h2>
-    <label>DeepSeek API key — required for translation</label>
+    <label for="deepseek">DeepSeek API key — required for local ASR translation</label>
     <input type="password" id="deepseek" placeholder="sk-… (leave blank to keep current)">
-    <label>Wyzie key — optional, enables existing-subtitle lookup</label>
+    <label for="wyzie">Wyzie key — optional, enables existing-subtitle lookup</label>
     <input type="password" id="wyzie" placeholder="wyzie-… (leave blank to keep current)">
+    <label for="openrouter">OpenRouter API key — optional, enables fast Cloud mode</label>
+    <input type="password" id="openrouter" placeholder="sk-or-… (leave blank to keep current)">
     <div class="hint">Get a free Wyzie key at store.wyzie.io/redeem — 1,000 lookups/day.</div>
     <div class="hint">Fast cloud captioning uses OpenRouter (Gemini Flash) and needs credit:
-      roughly $0.30 per feature film. It falls back to local whisper if the call fails.</div>
-    <div class="hint">If the engine already has a key from <code>~/.hermes/.env</code>, you can leave this blank.</div>
+      roughly $0.30 per feature film. Audio leaves this Mac only when Cloud mode is chosen;
+      a failed call falls back to local whisper.</div>
+    <div class="hint">Keys are stored locally with <code>0600</code> permissions in <code>~/.allsubs/config.json</code>.</div>
   </section>
 
   <section>

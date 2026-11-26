@@ -39,11 +39,19 @@ def available():
 
 
 def _to_mp3(path):
-    out = os.path.join(tempfile.gettempdir(), "allsubs_cloud_%d.mp3" % int(time.time() * 1000))
-    subprocess.run([captions.FFMPEG, "-y", "-v", "error", "-i", path,
-                    "-ar", "16000", "-ac", "1", "-b:a", "64k", out],
-                   check=True, timeout=300)
-    return out
+    fd, out = tempfile.mkstemp(prefix="allsubs_cloud_", suffix=".mp3")
+    os.close(fd)
+    try:
+        subprocess.run([captions.FFMPEG, "-y", "-v", "error", "-vn", "-i", path,
+                        "-ar", "16000", "-ac", "1", "-b:a", "32k", out],
+                       check=True, timeout=300)
+        return out
+    except Exception:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        raise
 
 
 def _cues_from(content):
@@ -73,14 +81,15 @@ def _cues_from(content):
     return salvage
 
 
-def transcribe_chunk(path, language="en", target="en", timeout=300):
+def transcribe_chunk(path, language="en", target="en", timeout=300, retries=3):
     """Return cues [{start,end,text}] relative to the chunk, already translated."""
     key = _key()
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     mp3 = _to_mp3(path)
     try:
-        b64 = base64.b64encode(open(mp3, "rb").read()).decode()
+        with open(mp3, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode()
     finally:
         try:
             os.remove(mp3)
@@ -99,12 +108,40 @@ def transcribe_chunk(path, language="en", target="en", timeout=300):
         "response_format": {"type": "json_object"},
         "max_tokens": 4000,
     }
-    req = urllib.request.Request(
-        ENDPOINT, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer " + key})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.load(resp)
+    raw_body = json.dumps(body, separators=(",", ":")).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + key,
+        "Connection": "keep-alive",
+    }
+    data = None
+    last = None
+    for attempt in range(retries):
+        try:
+            status, resp_headers, raw = captions._post_keepalive(
+                "openrouter.ai", "/api/v1/chat/completions", raw_body, headers, timeout=timeout)
+            if status == 200:
+                data = json.loads(raw.decode("utf-8", "replace"))
+                break
+            snippet = raw.decode("utf-8", "replace")[:240]
+            if status in (400, 401, 402, 403, 404):
+                raise RuntimeError("OpenRouter HTTP %d: %s" % (status, snippet))
+            last = RuntimeError("OpenRouter HTTP %d: %s" % (status, snippet))
+            retry_after = None
+            for hk, hv in resp_headers.items():
+                if hk.lower() == "retry-after":
+                    try:
+                        retry_after = float(hv)
+                    except ValueError:
+                        pass
+            time.sleep(retry_after if retry_after is not None else (1.5 * (2 ** attempt)))
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            last = exc
+            time.sleep(1.5 * (2 ** attempt))
+    if data is None:
+        raise RuntimeError("cloud ASR failed: %s" % last)
     content = data["choices"][0]["message"]["content"]
     items = _cues_from(content)
     cues = []

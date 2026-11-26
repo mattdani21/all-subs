@@ -1,11 +1,12 @@
 #!/bin/bash
-# All Subs engine control: ./allsubs setup|doctor|start|stop|status|logs
+# All Subs engine control: ./allsubs setup|model|doctor|start|stop|status|logs|test|clean|package|local-model|handoff
 set -uo pipefail
 # never inherit a foreign virtualenv's site-packages
 unset PYTHONPATH PYTHONHOME 2>/dev/null || true
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PIDFILE="$ROOT/.engine.pid"
 LOG="$HOME/.allsubs/engine.log"
+CONFIG="$HOME/.allsubs/config.json"
 PORT="${ALLSUBS_PORT:-8765}"
 MODEL="$HOME/.whisper-models/ggml-large-v3-turbo.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
@@ -16,34 +17,52 @@ running() {
 }
 
 key_source() {
-  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then echo "environment"; return 0; fi
+  local env_var="${1:-DEEPSEEK_API_KEY}"
+  local cfg_key="${2:-deepseek_api_key}"
+  if [ -n "${!env_var:-}" ]; then echo "environment"; return 0; fi
   for f in "$ROOT/.env" "$HOME/.hermes/.env"; do
-    if [ -f "$f" ] && grep -q '^DEEPSEEK_API_KEY=.' "$f" 2>/dev/null; then echo "$f"; return 0; fi
+    if [ -f "$f" ] && grep -q "^${env_var}=." "$f" 2>/dev/null; then echo "$f"; return 0; fi
   done
+  if [ -f "$CONFIG" ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get(sys.argv[2]) else 1)" "$CONFIG" "$cfg_key" 2>/dev/null; then
+    echo "$CONFIG"
+    return 0
+  fi
   return 1
+}
+
+download_model() {
+  if [ -s "$MODEL" ]; then
+    echo "model: $(du -h "$MODEL" | cut -f1) at $MODEL"
+    return 0
+  fi
+  echo "downloading whisper large-v3-turbo (~1.5 GB, one time)"
+  curl -L --fail --progress-bar -C - -o "$MODEL" "$MODEL_URL"
 }
 
 case "${1:-status}" in
   setup)
+    lite=0
+    if [ "${2:-}" = "--lite" ] || [ "${2:-}" = "--no-model" ]; then lite=1; fi
     fail=0
     if ! command -v brew >/dev/null; then
       echo "Homebrew is required first: https://brew.sh"; exit 1
     fi
     pkgs=()
     command -v ffmpeg >/dev/null || pkgs+=(ffmpeg)
-    command -v whisper-cli >/dev/null || pkgs+=(whisper-cpp)
     command -v yt-dlp >/dev/null || pkgs+=(yt-dlp)
+    if [ $lite -eq 0 ]; then
+      command -v whisper-cli >/dev/null || pkgs+=(whisper-cpp)
+    fi
     if [ ${#pkgs[@]} -gt 0 ]; then
       echo "installing: ${pkgs[*]}"
       HOMEBREW_NO_AUTO_UPDATE=1 brew install "${pkgs[@]}" || fail=1
     else
-      echo "binaries: ffmpeg, whisper-cli, yt-dlp present"
+      echo "binaries: required tools present"
     fi
-    if [ ! -s "$MODEL" ]; then
-      echo "downloading whisper large-v3-turbo (1.5 GB, one time)"
-      curl -L --fail --progress-bar -C - -o "$MODEL" "$MODEL_URL" || fail=1
+    if [ $lite -eq 0 ]; then
+      download_model || fail=1
     else
-      echo "model: $(du -h "$MODEL" | cut -f1) at $MODEL"
+      echo "model: skipped (--lite; run ./allsubs model later if you need local transcription)"
     fi
     if python3 -c "import youtube_transcript_api" 2>/dev/null; then
       echo "youtube captions: present"
@@ -60,27 +79,32 @@ case "${1:-status}" in
       echo "python3 >= 3.9 is missing (install Xcode Command Line Tools: xcode-select --install)"
       fail=1
     fi
-    if src=$(key_source); then
+    if src=$(key_source DEEPSEEK_API_KEY deepseek_api_key); then
       echo "deepseek key: $src"
+    elif src=$(key_source OPENROUTER_API_KEY openrouter_api_key); then
+      echo "openrouter key: $src (cloud mode)"
     else
-      echo "deepseek key: MISSING — create $ROOT/.env with:"
-      echo "  DEEPSEEK_API_KEY=sk-..."
-      fail=1
+      echo "api key: not set yet — add DEEPSEEK_API_KEY in extension Settings or $ROOT/.env"
     fi
     [ $fail -eq 0 ] && echo "setup complete — ./allsubs start" || echo "setup finished with problems above"
     exit $fail
+    ;;
+  model)
+    download_model
     ;;
   doctor)
     ok=0
     printf "%-16s " "python3"; python3 -V 2>&1 || { echo missing; ok=1; }
     printf "%-16s " "ffmpeg"; (ffmpeg -version 2>/dev/null | head -1) || { echo missing; ok=1; }
-    printf "%-16s " "whisper-cli"; command -v whisper-cli || { echo missing; ok=1; }
+    printf "%-16s " "whisper-cli"; command -v whisper-cli || echo "missing (optional for retrieval/cloud)"
     printf "%-16s " "yt-dlp"
     if command -v yt-dlp >/dev/null; then yt-dlp --version
     elif [ -x "$HOME/Library/Python/3.9/bin/yt-dlp" ]; then "$HOME/Library/Python/3.9/bin/yt-dlp" --version
-    else echo missing; fi
-    printf "%-16s " "model"; if [ -s "$MODEL" ]; then du -h "$MODEL" | cut -f1; else echo "missing ($MODEL)"; ok=1; fi
-    printf "%-16s " "deepseek key"; if src=$(key_source); then echo "$src"; else echo "missing"; ok=1; fi
+    else echo missing; ok=1; fi
+    printf "%-16s " "model"; if [ -s "$MODEL" ]; then du -h "$MODEL" | cut -f1; else echo "missing (./allsubs model)"; fi
+    printf "%-16s " "deepseek key"; if src=$(key_source DEEPSEEK_API_KEY deepseek_api_key); then echo "$src"; else echo "not set (Settings or .env)"; fi
+    printf "%-16s " "wyzie key"; if src=$(key_source WYZIE_API_KEY wyzie_api_key); then echo "$src"; else echo "not set (optional, library lookup)"; fi
+    printf "%-16s " "openrouter key"; if src=$(key_source OPENROUTER_API_KEY openrouter_api_key); then echo "$src"; else echo "not set (optional, cloud mode)"; fi
     printf "%-16s " "engine"
     curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || { echo "offline (./allsubs start)"; ok=1; }
     printf "%-16s " "extension"; [ -f "$ROOT/extension/manifest.json" ] && echo "$ROOT/extension" || { echo missing; ok=1; }
@@ -113,13 +137,28 @@ case "${1:-status}" in
       echo "saved $FILE"
     fi
     ;;
+  test)
+    python3 -m py_compile "$ROOT"/engine/*.py && python3 "$ROOT/test/test_units.py"
+    ;;
+  clean)
+    removed=0
+    for d in "$HOME/.allsubs/jobs"/*_work; do
+      [ -d "$d" ] || continue
+      rm -rf "$d"
+      removed=$((removed + 1))
+    done
+    echo "removed $removed temporary job workdir(s)"
+    if [ -d "$HOME/.allsubs/cache" ]; then
+      echo "cache size: $(du -sh "$HOME/.allsubs/cache" | cut -f1) ($HOME/.allsubs/cache)"
+    fi
+    ;;
   handoff)
     DIR="$ROOT/dist"; mkdir -p "$DIR"
     PARENT="$(dirname "$ROOT")"; NAME="$(basename "$ROOT")"
     TMP="$(mktemp -d)/AllSubs-src.tgz"
     (cd "$PARENT" && tar czf "$TMP" \
        --exclude="$NAME/media" --exclude="$NAME/models" --exclude="$NAME/dist" \
-       --exclude='__pycache__' \
+       --exclude='__pycache__' --exclude='.DS_Store' \
        --exclude="$NAME/test/*.png" --exclude="$NAME/.engine.pid" \
        --exclude="$NAME/.env" "$NAME") || exit 1
     mv "$TMP" "$DIR/AllSubs-src.tgz"
@@ -135,17 +174,35 @@ case "${1:-status}" in
     exec python3 "$ROOT/engine/handoff.py" "$ROOT" "$TOKEN" "$PORT" 900
     ;;
   package)
-    VER=$(python3 -c "import json;print(json.load(open('$ROOT/extension/manifest.json'))['version'])")
+    VER=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$ROOT/extension/manifest.json")
     OUT="$ROOT/dist"; mkdir -p "$OUT"
-    TMP="$(mktemp -d)"; mkdir -p "$TMP/AllSubs"
-    rsync -a --exclude media --exclude models --exclude .git --exclude dist \
-      --exclude __pycache__ --exclude '*.png' --exclude .engine.pid --exclude .env \
-      --exclude '*.pyc' \
-      "$ROOT/" "$TMP/AllSubs/"
-    (cd "$TMP" && zip -qr "$OUT/AllSubs-$VER.zip" AllSubs)
-    rm -rf "$TMP"
-    echo "built $OUT/AllSubs-$VER.zip"
-    unzip -l "$OUT/AllSubs-$VER.zip" | tail -3
+    rm -f "$OUT/AllSubs-$VER.zip" "$OUT/AllSubs-extension-$VER.zip" "$OUT/SHA256SUMS.txt"
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+
+    # 1. Full source release bundle (clean, curated — no internal review notes or dev scripts)
+    STAGE="$TMP/AllSubs-$VER"
+    mkdir -p "$STAGE/engine" "$STAGE/extension" "$STAGE/test"
+    cp "$ROOT/allsubs" "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/.env.example" "$STAGE/"
+    chmod +x "$STAGE/allsubs"
+    rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' \
+      "$ROOT/engine/" "$STAGE/engine/"
+    rsync -a --exclude='.DS_Store' --exclude='Thumbs.db' \
+      "$ROOT/extension/" "$STAGE/extension/"
+    for f in test_units.py player.html serve.py blank.html; do
+      [ -f "$ROOT/test/$f" ] && cp "$ROOT/test/$f" "$STAGE/test/"
+    done
+    (cd "$TMP" && zip -qr "$OUT/AllSubs-$VER.zip" "AllSubs-$VER")
+
+    # 2. Chrome Web Store upload bundle (extension/ contents only at zip root)
+    (cd "$STAGE/extension" && zip -qr "$OUT/AllSubs-extension-$VER.zip" .)
+
+    # 3. Release checksums
+    (cd "$OUT" && shasum -a 256 "AllSubs-$VER.zip" "AllSubs-extension-$VER.zip" > SHA256SUMS.txt)
+
+    echo "built release artefacts in $OUT:"
+    ls -lh "$OUT/AllSubs-$VER.zip" "$OUT/AllSubs-extension-$VER.zip" "$OUT/SHA256SUMS.txt"
+    cat "$OUT/SHA256SUMS.txt"
     ;;
   start)
     if running; then echo "engine already running (pid $(cat "$PIDFILE"))"; exit 0; fi
@@ -178,6 +235,6 @@ case "${1:-status}" in
     tail -n "${2:-40}" "$LOG"
     ;;
   *)
-    echo "usage: $0 setup|doctor|start|stop|status|logs|package|local-model|handoff"; exit 2
+    echo "usage: $0 setup [--lite]|model|doctor|start|stop|status|logs|test|clean|package|local-model|handoff"; exit 2
     ;;
 esac

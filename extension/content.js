@@ -150,6 +150,7 @@
       '<button class="mini" data-el="bilingual">Bilingual</button>',
       '<button class="mini" data-el="minus">−0.1s</button>',
       '<button class="mini" data-el="plus">+0.1s</button>',
+      '<button class="mini" data-el="resetOffset" hidden>0s</button>',
       '<button class="mini" data-el="reload">Re-sync</button>',
       '<button class="mini" data-el="sync">Check sync</button>',
       '<button class="mini" data-el="settings">Settings</button>',
@@ -184,11 +185,13 @@
     });
     q('minus').addEventListener('click', function () { adjustOffset(-0.1); });
     q('plus').addEventListener('click', function () { adjustOffset(0.1); });
+    q('resetOffset').addEventListener('click', function () { resetOffset(); });
     root.querySelectorAll('.segbtn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         cfg.mode = btn.getAttribute('data-mode');
         saveCfg();
         paintConfig();
+        checkHealth();
       });
     });
     q('settings').addEventListener('click', function () {
@@ -236,7 +239,7 @@
         if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
           routed = true;
           chrome.runtime.sendMessage({
-            type: 'allsubs:api', path: path,
+            type: 'allsubs:api', path: path, backend: cfg.backend,
             method: opts.method || 'GET', body: opts.body || null
           }, function (resp) {
             if (chrome.runtime.lastError) {
@@ -269,30 +272,44 @@
     if (deep) deep.checked = !!cfg.deep;
     const local = S.root.querySelector('[data-el="local"]');
     if (local) local.checked = !!cfg.local;
-    if (S.root) {
-      S.root.querySelectorAll('.segbtn').forEach(function (b) {
-        b.classList.toggle('on', b.getAttribute('data-mode') === (cfg.mode || 'local'));
-      });
-      const hint = S.root.querySelector('[data-el="seghint"]');
-      if (hint) hint.textContent = cfg.mode === 'cloud'
-        ? 'One multimodal call per chunk. Fastest; audio leaves this Mac (~$0.30 per film).'
-        : 'Transcribes with whisper on this Mac. Audio stays local.';
-    }
+    S.root.querySelectorAll('.segbtn').forEach(function (b) {
+      b.classList.toggle('on', b.getAttribute('data-mode') === (cfg.mode || 'local'));
+    });
+    const hint = S.root.querySelector('[data-el="seghint"]');
+    if (hint) hint.textContent = cfg.mode === 'cloud'
+      ? 'One multimodal call per chunk. Fastest; audio leaves this Mac (~$0.30/film).'
+      : 'Transcribes with whisper on this Mac. Audio stays local; cue text translated.';
     const bi = S.root.querySelector('[data-el="bilingual"]');
     if (bi) bi.classList.toggle('on', !!cfg.bilingual);
+    const rst = S.root.querySelector('[data-el="resetOffset"]');
+    if (rst) rst.hidden = !(cfg.offset && Math.abs(cfg.offset) >= 0.05);
+  }
+
+  function persistSiteOffset(val) {
+    try {
+      chrome.storage.local.get({ offsets: {} }, function (v) {
+        const offsets = v.offsets || {};
+        if (!val) delete offsets[location.hostname];
+        else offsets[location.hostname] = val;
+        chrome.storage.local.set({ offsets: offsets });
+      });
+    } catch (e) { /* noop */ }
   }
 
   function adjustOffset(delta) {
     cfg.offset = Math.round(((cfg.offset || 0) + delta) * 10) / 10;
     if (S.overlay) S.overlay.setOffset(cfg.offset);
+    paintConfig();
     setStatus('Shift ' + (cfg.offset > 0 ? '+' : '') + cfg.offset.toFixed(1) + 's later');
-    try {
-      chrome.storage.local.get({ offsets: {} }, function (v) {
-        const offsets = v.offsets || {};
-        offsets[location.hostname] = cfg.offset;
-        chrome.storage.local.set({ offsets: offsets });
-      });
-    } catch (e) { /* noop */ }
+    persistSiteOffset(cfg.offset);
+  }
+
+  function resetOffset() {
+    cfg.offset = 0;
+    if (S.overlay) S.overlay.setOffset(0);
+    paintConfig();
+    setStatus('Subtitle timing reset to 0.0s');
+    persistSiteOffset(0);
   }
 
   function loadSiteOffset() {
@@ -302,6 +319,7 @@
         if (typeof saved === 'number' && saved !== 0) {
           cfg.offset = saved;
           if (S.overlay) S.overlay.setOffset(saved);
+          paintConfig();
         }
       });
     } catch (e) { /* noop */ }
@@ -339,9 +357,11 @@
           ? 'No local model — run ./allsubs local-model'
           : (tooSmall ? 'Offline mode needs 16 GB+ for GPU offload' : '');
       }
-      if (!d.model) {
-        setStatus('Speech model missing — run: cd ~/AllSubs && ./allsubs setup', true);
-      } else if (d.deepseek_key === false) {
+      if (cfg.mode === 'cloud' && d.cloud_key === false) {
+        setStatus('Cloud mode needs an OpenRouter key — open Settings.', true);
+      } else if (cfg.mode !== 'cloud' && !d.model) {
+        setStatus('Speech model missing (retrieval still works) — run ./allsubs model', true);
+      } else if (cfg.mode !== 'cloud' && !cfg.local && d.deepseek_key === false) {
         setStatus('No translation key — open Settings to add one.', true);
       } else if (!S.job) {
         setStatus('Engine online — ready when you are.');
@@ -389,17 +409,27 @@
     return usable[0] || null;
   }
 
+  let videoRO = null;
+  let hostPosRaf = 0;
+
   function attachVideo(v) {
     if (!v || v === S.video) return;
     S.video = v;
+    if (videoRO) { videoRO.disconnect(); videoRO = null; }
     if (S.overlay) S.overlay.destroy();
     S.overlay = window.AllSubsOverlay.mount(v);
     S.overlay.setBilingual(cfg.bilingual);
     S.overlay.setOffset(cfg.offset || 0);
     if (S.cues.length) S.overlay.setCues(S.cues);
+    if (typeof ResizeObserver === 'function') {
+      videoRO = new ResizeObserver(schedulePositionHost);
+      videoRO.observe(v);
+    }
+    schedulePositionHost();
   }
 
   function positionHost() {
+    hostPosRaf = 0;
     if (!S.host) return;
     const v = S.video;
     if (!v || !document.contains(v) || area(v) === 0) {
@@ -408,10 +438,15 @@
     }
     S.host.style.display = 'block';
     const r = v.getBoundingClientRect();
-    S.host.style.left = r.left + 'px';
-    S.host.style.top = r.top + 'px';
-    S.host.style.width = r.width + 'px';
-    S.host.style.height = r.height + 'px';
+    S.host.style.left = Math.round(r.left) + 'px';
+    S.host.style.top = Math.round(r.top) + 'px';
+    S.host.style.width = Math.round(r.width) + 'px';
+    S.host.style.height = Math.round(r.height) + 'px';
+  }
+
+  function schedulePositionHost() {
+    if (hostPosRaf || !S.host) return;
+    hostPosRaf = requestAnimationFrame(positionHost);
   }
 
   // ------------------------------------------------------------ job flow
@@ -429,7 +464,7 @@
     return null;
   }
 
-  async function startJob() {
+  async function startJob(forceAi) {
     if (S.busy) return;
     buildUI();
     if (!S.video) { setStatus('No video found on this page.', true); return; }
@@ -449,7 +484,7 @@
           media_url: mediaCandidate(),
           title: (document.title || '').slice(0, 200),
           cookies: false,
-          force: !!cfg.forceAi
+          force: !!forceAi
         }
       });
       S.job = job.id;
@@ -486,7 +521,11 @@
       const d = await api('/api/jobs/' + S.job);
       setEngine(true);
       if (S.overlay && d.source) {
-        S.overlay.setBadge(d.source === 'native' ? 'official subs' : (d.source === 'wyzie' ? 'library subs' : (d.source === 'cloud' ? 'cloud subs' : 'AI subs')));
+        S.overlay.setBadge(
+          d.source === 'native' ? 'official subs'
+            : (d.source === 'wyzie' ? 'library subs'
+              : (d.source === 'cloud' ? 'cloud subs'
+                : (d.source === 'youtube' ? 'YouTube subs' : 'AI subs'))));
       }
       setStatus(d.stage + (d.error ? ' — ' + d.error : ''), d.status === 'error');
       setProgress(d.progress || 0);
@@ -497,26 +536,28 @@
           library: 'subs: library' + (track.provider ? ' · ' + track.provider : ''),
           native: 'subs: this site\'s own track',
           youtube: 'subs: YouTube captions',
+          cloud: 'subs: cloud AI',
           asr: 'subs: AI-generated'
         }[track.kind] || '') : '';
+        const costNote = d.usage && d.usage.estimated_usd >= 0.0005
+          ? '~$' + d.usage.estimated_usd.toFixed(3) : '';
         meta.textContent = [
           d.title || '',
           prov,
           track && track.lang ? 'lang ' + track.lang : (d.lang ? 'heard: ' + d.lang : ''),
           track && track.note ? track.note : '',
           d.count ? d.count + ' cues' : '',
+          costNote,
           d.pass2 ? 'whole-film pass done' : ''
         ].filter(Boolean).join(' · ');
-        if (track && track.kind !== 'asr') {
+        if (track && track.kind !== 'asr' && track.kind !== 'cloud') {
           const b = document.createElement('button');
           b.className = 'mini';
           b.textContent = 'Use AI instead';
           b.style.marginLeft = '8px';
           b.addEventListener('click', function () {
-            cfg.forceAi = true;
-            saveCfg();
             S.job = null; S.cues = []; S.version = -1;
-            startJob();
+            startJob(true);
           });
           meta.appendChild(b);
         }
@@ -540,7 +581,10 @@
 
   async function pullCues(status, force) {
     if (!status.count) return;
-    const needFull = force || status.pass2 !== S.pass2 || status.count < S.cues.length;
+    const versionChanged = typeof status.version === 'number' && status.version !== S.version;
+    const needFull = force || status.pass2 !== S.pass2 || status.count < S.cues.length
+      || (versionChanged && status.count <= S.cues.length);
+    if (!needFull && status.count <= S.cues.length) return;
     let from = needFull ? 0 : S.cues.length;
     let guard = 0;
     const collected = needFull ? [] : S.cues.slice();
@@ -556,28 +600,53 @@
     }
     S.cues = collected;
     S.pass2 = !!status.pass2;
+    if (typeof status.version === 'number') S.version = status.version;
     S.total = collected.length;
     if (S.overlay) S.overlay.setCues(collected);
   }
 
   // ------------------------------------------------------------ boot
 
+  let scanTimer = 0;
+  function scanVideos() {
+    scanTimer = 0;
+    const next = pickVideo();
+    if (next && next !== S.video) {
+      attachVideo(next);
+      if (S.cues.length && S.overlay) S.overlay.setCues(S.cues);
+    }
+    if (next) {
+      buildUI();
+      schedulePositionHost();
+    } else if (S.host && (!S.video || !document.contains(S.video))) {
+      S.host.style.display = 'none';
+    }
+  }
+
+  function scheduleScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(scanVideos, 350);
+  }
+
   function boot() {
     loadSiteOffset();
-    const v = pickVideo();
-    if (v) {
-      attachVideo(v);
-      buildUI();
+    scanVideos();
+    // Event-driven discovery: zero steady-state polling on pages without video changes.
+    if (typeof MutationObserver === 'function' && document.documentElement) {
+      const mo = new MutationObserver(function (mutations) {
+        for (let i = 0; i < mutations.length; i++) {
+          if (mutations[i].addedNodes.length || mutations[i].removedNodes.length) {
+            scheduleScan();
+            return;
+          }
+        }
+      });
+      mo.observe(document.documentElement, { childList: true, subtree: true });
     }
-    setInterval(function () {
-      const next = pickVideo();
-      if (next && next !== S.video) {
-        attachVideo(next);
-        if (S.cues.length && S.overlay) S.overlay.setCues(S.cues);
-      }
-      if (next) buildUI();
-      positionHost();
-    }, 1200);
+    document.addEventListener('loadedmetadata', scheduleScan, true);
+    document.addEventListener('fullscreenchange', schedulePositionHost);
+    window.addEventListener('resize', schedulePositionHost, { passive: true });
+    window.addEventListener('scroll', schedulePositionHost, { passive: true, capture: true });
   }
 
   if (document.readyState === 'loading') {
