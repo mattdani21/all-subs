@@ -1,4 +1,4 @@
-media/
+/media/
 __pycache__/
 *.pyc
 .engine.pid
